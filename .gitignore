@@ -1,0 +1,46 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+backend/.env
+build/
+
+# Runtime data (never commit user books or secrets)
+data/
+*.db
+*.db-wal
+*.db-shm
+secrets.key
+*.log
+
+# Node / Vite / Tauri
+node_modules/
+desktop/frontend/dist/
+desktop/frontend/.vite/
+desktop/src-tauri/target/
+desktop/src-tauri/gen/
+*.tsbuildinfo
+
+# Flutter
+mobile/.dart_tool/
+mobile/.flutter-plugins
+mobile/.flutter-plugins-dependencies
+mobile/build/
+mobile/.packages
+mobile/android/.gradle/
+mobile/android/local.properties
+mobile/ios/Pods/
+mobile/ios/.symlinks/
+mobile/ios/Flutter/ephemeral/
+
+# IDE / OS
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db

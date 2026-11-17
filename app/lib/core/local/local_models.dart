@@ -1,0 +1,253 @@
+class AiProviderRecord {
+  const AiProviderRecord({
+    required this.id,
+    required this.name,
+    required this.kind,
+    required this.baseUrl,
+    this.notes,
+    this.enabled = true,
+    this.apiKey = '',
+  });
+
+  final String id;
+  final String name;
+  final String kind;
+  final String baseUrl;
+  final String? notes;
+  final bool enabled;
+  final String apiKey;
+
+  factory AiProviderRecord.fromRow(
+    Map<String, Object?> row, {
+    String apiKey = '',
+  }) => AiProviderRecord(
+    id: row['id'] as String,
+    name: row['name'] as String,
+    kind: row['kind'] as String? ?? 'openai_compatible',
+    baseUrl: row['base_url'] as String? ?? '',
+    notes: row['notes'] as String?,
+    enabled: (row['enabled'] as int? ?? 1) == 1,
+    apiKey: apiKey,
+  );
+}
+
+class AiModelRecord {
+  const AiModelRecord({
+    required this.id,
+    required this.providerId,
+    required this.name,
+    required this.displayName,
+    this.contextWindow = 8192,
+    this.maxOutputTokens = 2048,
+    this.timeoutSeconds = 120,
+    this.capabilities = const ['translation', 'chat'],
+    this.supportsJson = true,
+    this.isDefaultTranslation = false,
+    this.isDefaultChat = false,
+    this.enabled = true,
+  });
+
+  final String id;
+  final String providerId;
+  final String name;
+  final String displayName;
+  final int contextWindow;
+  final int maxOutputTokens;
+  final int timeoutSeconds;
+  final List<String> capabilities;
+  final bool supportsJson;
+  final bool isDefaultTranslation;
+  final bool isDefaultChat;
+  final bool enabled;
+
+  bool supports(String capability) => capabilities.contains(capability);
+
+  factory AiModelRecord.fromRow(Map<String, Object?> row) => AiModelRecord(
+    id: row['id'] as String,
+    providerId: row['provider_id'] as String,
+    name: row['name'] as String,
+    displayName: row['display_name'] as String? ?? row['name'] as String,
+    contextWindow: row['context_window'] as int? ?? 8192,
+    maxOutputTokens: row['max_output_tokens'] as int? ?? 2048,
+    timeoutSeconds: row['timeout_seconds'] as int? ?? 120,
+    capabilities: _stringList(row['capabilities']),
+    supportsJson: (row['supports_json'] as int? ?? 1) == 1,
+    isDefaultTranslation: (row['is_default_translation'] as int? ?? 0) == 1,
+    isDefaultChat: (row['is_default_chat'] as int? ?? 0) == 1,
+    enabled: (row['enabled'] as int? ?? 1) == 1,
+  );
+}
+
+class PromptRecord {
+  const PromptRecord({
+    required this.id,
+    required this.key,
+    required this.version,
+    required this.name,
+    this.description,
+    required this.template,
+    this.variables = const [],
+    this.isActive = false,
+    this.createdAt,
+  });
+
+  final String id;
+  final String key;
+  final int version;
+  final String name;
+  final String? description;
+  final String template;
+  final List<String> variables;
+  final bool isActive;
+  final String? createdAt;
+
+  factory PromptRecord.fromRow(Map<String, Object?> row) => PromptRecord(
+    id: row['id'] as String,
+    key: row['key'] as String,
+    version: row['version'] as int? ?? 1,
+    name: row['name'] as String? ?? '',
+    description: row['description'] as String?,
+    template: row['template'] as String? ?? '',
+    variables: _stringList(row['variables']),
+    isActive: (row['is_active'] as int? ?? 0) == 1,
+    createdAt: row['created_at'] as String?,
+  );
+}
+
+List<String> _stringList(Object? value) {
+  if (value is List) return value.map((item) => '$item').toList();
+  if (value is String && value.trim().isNotEmpty) {
+    try {
+      final decoded = value;
+      if (decoded.startsWith('[')) {
+        return decoded
+            .replaceAll(RegExp(r'[\[\]"]'), '')
+            .split(',')
+            .map((item) => item.trim())
+            .where((item) => item.isNotEmpty)
+            .toList();
+      }
+    } catch (_) {
+      // Fall through to a single value.
+    }
+    return [value];
+  }
+  return const [];
+}
+
+class SearchSentenceHit {
+  const SearchSentenceHit({
+    required this.sentenceId,
+    required this.bookId,
+    required this.bookTitle,
+    required this.chapterId,
+    required this.chapterTitle,
+    required this.text,
+    required this.docType,
+    this.originalText,
+  });
+
+  final String sentenceId;
+  final String bookId;
+  final String bookTitle;
+  final String chapterId;
+  final String chapterTitle;
+  final String text;
+  final String docType;
+  final String? originalText;
+}
+
+class SearchEntityHit {
+  const SearchEntityHit({
+    required this.id,
+    required this.name,
+    required this.kind,
+    this.dynasty,
+    this.summary,
+    this.status = 'pending',
+  });
+
+  final String id;
+  final String name;
+  final String kind;
+  final String? dynasty;
+  final String? summary;
+  final String status;
+}
+
+class SearchEventHit {
+  const SearchEventHit({
+    required this.id,
+    required this.name,
+    required this.eventType,
+    this.timeRaw,
+    this.timeStartYear,
+    this.status = 'extracted',
+  });
+
+  final String id;
+  final String name;
+  final String eventType;
+  final String? timeRaw;
+  final int? timeStartYear;
+  final String status;
+}
+
+class LocalSearchResults {
+  const LocalSearchResults({
+    this.sentences = const [],
+    this.entities = const [],
+    this.events = const [],
+  });
+
+  final List<SearchSentenceHit> sentences;
+  final List<SearchEntityHit> entities;
+  final List<SearchEventHit> events;
+
+  int get total => sentences.length + entities.length + events.length;
+}
+
+class GraphNode {
+  const GraphNode({
+    required this.id,
+    required this.label,
+    required this.kind,
+    this.dynasty,
+    this.status,
+    this.degree = 0,
+  });
+  final String id;
+  final String label;
+  final String kind;
+  final String? dynasty;
+  final String? status;
+  final int degree;
+}
+
+class GraphEdge {
+  const GraphEdge({
+    required this.id,
+    required this.source,
+    required this.target,
+    required this.relationType,
+    this.label,
+    this.status = 'inferred',
+  });
+  final String id;
+  final String source;
+  final String target;
+  final String relationType;
+  final String? label;
+  final String status;
+}
+
+class LocalGraphData {
+  const LocalGraphData({
+    this.nodes = const [],
+    this.edges = const [],
+    this.centerId,
+  });
+  final List<GraphNode> nodes;
+  final List<GraphEdge> edges;
+  final String? centerId;
+}

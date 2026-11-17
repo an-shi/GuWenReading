@@ -76,6 +76,8 @@ flutter build windows --debug
 - 新增 AI 服务商预设、模型列表读取与多模态能力识别；“添加服务商”改为分区式对话框。
 - 导入流程增加文件名、解析阶段、百分比、已用时与失败详情；数据库改为批量写入，FTS 索引分批提交。
 - 使用《史记》EPUB（5.2 MB）实测：解析约 1.6 秒，完整导入约 10.4 秒，共 281 章、131,678 句。
+- 使用《汉书》EPUB（1.6 MB）实测：完整导入约 4.9 秒，共 120 章、44,668 句。
+- Windows 端关闭 Flutter 的 MSAA/UIA 无障碍树，规避 Flutter 3.47 引擎在原生文件对话框关闭时 `AccessibilityBridge::CreateRemoveReparentedNodesUpdate` 的崩溃。
 - 验证方式：`flutter analyze` 无问题，`flutter build windows --debug` 成功且应用可打开。
 
 ## 3. 验证过的核心路径

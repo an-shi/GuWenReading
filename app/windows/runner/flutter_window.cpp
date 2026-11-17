@@ -4,6 +4,26 @@
 
 #include "flutter/generated_plugin_registrant.h"
 
+namespace {
+
+// The engine's accessibility bridge can crash while reparenting semantics
+// nodes when a native modal dialog closes (for example the file picker).
+// Refuse MSAA/UIA queries on the Flutter view's child window as well; the
+// top-level window does the same in MessageHandler.
+WNDPROC g_flutter_child_wndproc = nullptr;
+
+LRESULT CALLBACK FlutterChildWndProc(HWND hwnd,
+                                     UINT message,
+                                     WPARAM wparam,
+                                     LPARAM lparam) {
+  if (message == WM_GETOBJECT) {
+    return 0;
+  }
+  return CallWindowProc(g_flutter_child_wndproc, hwnd, message, wparam, lparam);
+}
+
+}  // namespace
+
 FlutterWindow::FlutterWindow(const flutter::DartProject& project)
     : project_(project) {}
 
@@ -26,6 +46,18 @@ bool FlutterWindow::OnCreate() {
   }
   RegisterPlugins(flutter_controller_->engine());
   SetChildContent(flutter_controller_->view()->GetNativeWindow());
+
+  if (g_flutter_child_wndproc == nullptr) {
+    HWND flutter_view = flutter_controller_->view()->GetNativeWindow();
+    if (flutter_view) {
+      auto original = reinterpret_cast<WNDPROC>(
+          SetWindowLongPtr(flutter_view, GWLP_WNDPROC,
+                           reinterpret_cast<LONG_PTR>(FlutterChildWndProc)));
+      if (original != nullptr) {
+        g_flutter_child_wndproc = original;
+      }
+    }
+  }
 
   flutter_controller_->engine()->SetNextFrameCallback([&]() {
     this->Show();
@@ -51,6 +83,15 @@ LRESULT
 FlutterWindow::MessageHandler(HWND hwnd, UINT const message,
                               WPARAM const wparam,
                               LPARAM const lparam) noexcept {
+  // Flutter 3.47's Windows accessibility bridge can crash in
+  // AccessibilityBridge::CreateRemoveReparentedNodesUpdate when a native
+  // dialog (for example the file picker) opens while a UI automation client is
+  // querying the window. This is a local desktop reader and does not ship an
+  // accessibility tree, so decline MSAA/UIA requests instead of crashing.
+  if (message == WM_GETOBJECT) {
+    return 0;
+  }
+
   // Give Flutter, including plugins, an opportunity to handle window messages.
   if (flutter_controller_) {
     std::optional<LRESULT> result =

@@ -113,6 +113,7 @@ flutter build ios
 ## 8. 已知构建限制
 
 - Windows 开发者模式已开启，`flutter build windows --debug` 已成功构建并启动。
+- Windows 端不向系统暴露 Flutter 的 MSAA/UIA 无障碍树，用于规避 Flutter 3.47 引擎在文件选择框关闭时的原生崩溃；屏幕阅读器/自动化工具无法读取 Flutter 界面内容。
 - 当前环境没有可用的 Android 模拟器/真机，APK 只完成构建验证。
 - PDFium 首次构建需要下载原生库；网络不稳定时会重试。
 - 扫描版 PDF 的 OCR 未实现。

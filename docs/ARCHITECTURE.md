@@ -59,6 +59,8 @@
 | 助手 | `core/local/assistant_service.dart` | 上下文构建、引用校验、会话保存 |
 | 备份 | `core/local/backup_service.dart` | 备份 ZIP、导出、恢复、恢复前副本 |
 
+章节翻译与知识抽取的完整调用链、缓存、失败重试和 AI 费用优化方案见 [AI_PIPELINE_COSTS.md](AI_PIPELINE_COSTS.md)。
+
 ## 3. 数据流
 
 ### 导入

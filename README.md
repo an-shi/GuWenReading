@@ -120,6 +120,7 @@ flutter test
 - [数据库](docs/DATABASE.md)
 - [本地核心](docs/LOCAL_CORE.md)
 - [AI 提示词](docs/AI_PROMPTS.md)
+- [翻译/抽取调用链与成本优化](docs/AI_PIPELINE_COSTS.md)
 - [构建与发布](docs/BUILD.md)
 - [开发计划](docs/DEVELOPMENT_PLAN.md)
 - [测试报告](docs/TEST_REPORT.md)

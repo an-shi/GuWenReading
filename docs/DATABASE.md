@@ -1,127 +1,112 @@
 # 数据库设计
 
-数据库使用 SQLAlchemy 2.x Declarative 模型，默认 SQLite（`sqlite+aiosqlite`），Server 模式可用 PostgreSQL（`postgresql+asyncpg`）。
+最后更新：2026-11-16
 
-- 主键：字符串 UUID（36 字符），由 `IdMixin` 自动生成。
-- 时间：数据库内保存 naive UTC，API 序列化为带 `Z` 的 ISO 字符串。
-- 可同步实体：继承 `SyncMixin`，包含 `version`、`updated_at`、`deleted_at`。
-- 删除：业务数据默认软删除；原文/章节在重新解析时可硬删除。
-- 事务：服务层显式 commit；失败自动 rollback；任务每批保存。
+## 1. 存储位置
 
-## 1. 表分组
+每个设备拥有独立数据库，无中心数据库。
 
-### 书籍与原文
+```text
+<应用支持目录>/古文阅读器/
+  guwen.db
+  books/<bookId>/original.<ext>
+  covers/<bookId>.img
+  backups/古文阅读器备份-*.zip
+  backups/restore-before-*.db
+  tmp/
+```
 
-| 表 | 作用 | 关键字段/约束 |
-| --- | --- | --- |
-| `books` | 书籍元数据与托管文件 | `content_hash` unique；`original_path` / `extracted_path` 相对数据目录；`deleted_at` 软删除 |
-| `chapters` | 章节结构 | `(book_id, ordinal)` unique；`start_offset/end_offset` 指向 extracted text |
-| `paragraphs` | 段落 | `(chapter_id, ordinal)` unique；原文 + normalized_text + 偏移 |
-| `sentences` | 句子 | `(paragraph_id, ordinal)` unique；原文 + 偏移 + `translation_state` |
+- Windows 应用支持目录（通常位于 `%APPDATA%` 下）中的 `古文阅读器/`。
+- Android/iOS 使用应用私有目录。
+- 数据库使用 SQLite WAL 模式（平台不允许时自动退回）。
+- 启动时执行 `PRAGMA foreign_keys = ON`。
 
-原始文件路径指向 `data/books/<id>/source/`，提取文本在 `data/books/<id>/extracted.txt`。任何翻译都不会写回这些文件或原文列。
+## 2. 表结构
 
-### 译文与任务
+### 书籍与文本
 
-| 表 | 作用 |
-| --- | --- |
-| `translations` | 每句当前译文；`sentence_id` unique；`origin = ai/manual` |
-| `translation_versions` | 被替换/人工修订前的历史版本（不依赖 sentence 外键，重解析后仍保留） |
-| `translation_reviews` | 人工译文被 AI 重新翻译时的候选，待 accept/reject |
-| `translation_cache` | 原文 hash + 上下文 hash + 模型 + Prompt 版本 + 参数的缓存 |
-| `tasks` | 持久化后台任务；status/progress/payload/result/cancel_requested |
-| `prompt_templates` | Prompt 版本库；`(key, version)` unique |
+- `books`：书名、作者、朝代、分类、简介、标签、格式、原文件路径、封面、哈希、统计、时间。
+- `chapters`：书籍、序号、标题、段落数、句子数。
+- `paragraphs`：章节、序号、原文、起止偏移。
+- `sentences`：段落、章节、书籍、序号、原文、偏移、翻译状态、断句复核标记。
 
-### AI 配置
+### 翻译
 
-- `ai_providers`：名称、类型、Base URL、加密 API Key、hint、headers、启用状态。
-- `ai_models`：Provider 外键、模型 ID、上下文、最大输出、超时、并发、JSON/流式能力、默认翻译/问答标记。
-- `assistant_sessions` / `assistant_messages`：AI 阅读助手对话与 citations。
-- `glossary`：预留的历史词汇表。
+- `translations`：每句最多一条当前译文；来源 `manual`/`ai`、模型、提示词版本、版本号。
+- `translation_versions`：译文修改前的历史快照。
+- `translation_reviews`：重新翻译候选；`pending`/`accepted`/`rejected`。
+- `translation_cache`：提示词与模型组合对应的 AI 响应缓存。
 
 ### 阅读状态
 
-- `annotations`、`bookmarks`：软删除与版本字段。
-- `reading_progress`：`(book_id, device_id)` unique；**设备之间彼此独立**。
-- `devices`：设备注册/最后在线；fingerprint unique。
-- `users`：仅 Server 模式使用；PBKDF2-SHA256 密码哈希。
+- `annotations`：书籍/章节/段落/句子批注、引文、标签、颜色。
+- `bookmarks`：书籍、章节、段落、句子、位置比例。
+- `reading_progress`：每本书一条，记录章节、段落、句子与位置比例。
 
 ### 知识库
 
-- `historical_entities`：标准名、字、号、谥号、庙号、别名、朝代、身份、生卒、审核状态。
-- `entity_mentions`：实体在某句中的出现；可人工确认来源。
-- `entity_relations`：source/target/type/status；`explicit / inferred / confirmed / rejected`。
-- `relation_sources`：关系对应的书籍、章节、段落、句子与原文引文。
-- `historical_events`：名称、类型、原始纪年、年号/干支、标准化年份、精度、审核状态。
-- `event_participants`、`event_sources`：参与者与史料证据。
+- `entities`：标准名、类型、别名、朝代、身份、简介、生卒、字号、职官、审核状态。
+- `entity_mentions`：实体在原文中的出现位置与证据。
+- `entity_relations`：起点/终点实体、关系类型、说明、状态、置信度。
+- `relation_sources`：关系对应的原文证据。
+- `historical_events`：事件名、类型、描述、朝代、原始纪年、公元年份、精度、状态。
+- `event_participants`：事件参与者。
+- `event_sources`：事件原文出处。
 
-### 同步
+### 任务与 AI
 
-- `sync_operations`：自增 `seq`，记录每次 push 的操作、版本、状态、冲突快照。`applied / conflict / resolved_server` 参与 pull。
-- `sync_cursor`：每个设备最后拉取的 seq。
+- `tasks`：翻译/知识抽取任务、状态、进度、结果。
+- `ai_providers`：服务商名称、类型、基础地址、备注、启用状态。
+- `ai_models`：服务商、模型标识、显示名、上下文、最大输出、超时、能力、默认翻译/问答。
+- `prompt_templates`：提示词 key、版本、名称、说明、模板、变量、激活状态。
+- `assistant_sessions` / `assistant_messages`：AI 助手会话与消息、引用、claims。
+- `app_settings`：本地键值设置。
 
-### FTS5
-
-`search_fts` 为 FTS5 虚拟表：
+### 全文检索
 
 ```sql
 CREATE VIRTUAL TABLE search_fts USING fts5(
-  doc_type UNINDEXED, doc_id UNINDEXED, book_id UNINDEXED, chapter_id UNINDEXED,
-  title, body, tokenize='unicode61 remove_diacritics 2'
+  text,
+  book_id UNINDEXED,
+  chapter_id UNINDEXED,
+  sentence_id UNINDEXED,
+  doc_type UNINDEXED
 );
 ```
 
-写入时把 CJK 字符用空格分隔，以支持中文短语检索；`doc_type` 为 `original` 或 `translation`，`doc_id` 为 sentence id。启动时若索引为空而存在历史数据，会自动回填。
+- `doc_type` 为 `original` 或 `translation`。
+- 在导入、翻译保存、恢复备份后更新。
+- 平台 SQLite 不支持 FTS5 时，`SearchService` 自动使用 `LIKE` 查询。
 
-## 2. 关键关系
+## 3. 数据完整性
 
-```
-books 1─n chapters 1─n paragraphs 1─n sentences 1─1 translations
-                                             └── translation_versions
-                                             └── translation_reviews
-books 1─n annotations / bookmarks
-books 1─n reading_progress (per device)
-historical_entities n─n historical_entities via entity_relations
-entity_relations 1─n relation_sources ─ sentence
-historical_events 1─n event_sources ─ sentence
-historical_events n─n historical_entities via event_participants
-```
+- 外键级联删除书籍、章节、段落、句子与关联翻译/批注。
+- `source_hash` 唯一索引防止重复导入。
+- `translations.sentence_id` 唯一，保证一句一条当前译文。
+- `prompt_templates(key, version)` 唯一。
+- 人工译文保护在服务层实现：重新翻译 AI 译文会创建候选，不直接覆盖人工译文。
 
-## 3. 索引与约束
+## 4. 备份与恢复
 
-- 书籍：`content_hash` unique，标题/分类/状态索引。
-- 章节/段落/句子：`(parent_id, ordinal)` 唯一索引，按书/章的查询索引。
-- 译文：`sentence_id` unique，`chapter_id` 索引。
-- 事件：年份索引、类型/朝代索引。
-- 实体：名称、类型、朝代索引。
-- 阅读进度：`(book_id, device_id)` unique。
-- 所有子表对书籍/章节/段落有 `ON DELETE CASCADE`；历史译文版本不挂 sentence 外键，避免重解析时丢失版本。
+备份 ZIP：
 
-## 4. 迁移
-
-Alembic 配置位于 `backend/alembic.ini`，初始化迁移：
-
-```
-backend/alembic/versions/5d3b8b424a4c_initial_schema.py
+```text
+database/guwen.db
+books/...
+covers/...
+backup.json
 ```
 
-```powershell
-cd backend
-$env:GUWEN_DATA_DIR = "D:\古文阅读器-data"
-..\.venv\Scripts\python.exe -m alembic upgrade head
-```
+`backup.json` 记录应用名、版本、创建时间与格式 `guwenreader.backup.v1`。
 
-- 迁移包含全部 30 张业务表、索引、外键，以及在 SQLite 上创建 `search_fts`。
-- Server/PostgreSQL 部署建议设置 `GUWEN_AUTO_CREATE_SCHEMA=false` 并只通过 Alembic 升级。
-- Embedded 模式当前启动时使用 `create_all` 作为首次建库；已有数据库升级应使用 Alembic。生产发版前应改为启动时统一执行迁移（见 DEVELOPMENT_PLAN 遗留事项）。
+恢复流程：
 
-## 5. 备份
+1. 解压备份数据库到临时目录。
+2. 将当前数据库复制到 `backups/restore-before-*.db`。
+3. `ATTACH DATABASE` 备份库，事务内清空并复制业务表。
+4. 替换 `books/` 与 `covers/` 文件。
+5. 重建 FTS 索引。
 
-备份 ZIP 包含：
+## 5. 迁移
 
-- `database/guwen.db`（使用 SQLite online backup API 生成一致性快照）
-- `books/`（原始文件 + extracted.txt）
-- `covers/`
-- `backup.json`（版本、创建时间、格式）
-
-恢复使用 `scripts/restore_backup.py`，必须在后端停止时运行；恢复前会自动保存当前数据库和书籍目录到 `data/backups/pre-restore-*`。
+当前数据库版本为 1。启动时执行幂等的 `CREATE TABLE IF NOT EXISTS` 与 `CREATE INDEX IF NOT EXISTS`，为旧快照补齐新增表。后续结构变更应引入显式版本迁移。

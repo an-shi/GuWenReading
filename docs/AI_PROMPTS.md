@@ -1,91 +1,73 @@
-# AI Prompt 管理
+# AI 提示词与模型
 
-## 1. 原则
+最后更新：2026-11-16
 
-- Prompt 不硬编码在业务逻辑中：全部放在 `backend/app/resources/prompts/<key>/v<version>.md`。
-- 每个 Prompt 有独立 key 与递增版本；数据库 `prompt_templates` 保存版本内容。
-- 首次启动时，若数据库中不存在某 key，则导入内置文件的最新版本。
-- 后续修改通过 API 创建新版本；旧版本保留，可随时启用。
-- 每条译文保存 `prompt_version`；知识/事件记录的来源元数据也记录 Prompt 版本（事件 `metadata_json.prompt_version`）。
-- 翻译缓存 key 包含 Prompt 版本，因此切换 Prompt 不会错误复用旧缓存。
+## 1. 运行方式
 
-## 2. 文件格式
+古文阅读器不包含内置 AI 服务。所有 AI 请求由用户在“我的 → AI 模型”中配置的服务商发起：
 
-```markdown
----
-key: translation
-version: 1
-name: 文言文翻译（Balanced）
-variables: book_title, author, dynasty, chapter_title, context_before, context_after, items_json
-description: 将文言文句子准确、通顺地译为现代汉语。
----
-Prompt 正文，使用 {{variable}} 占位符。
-```
+- OpenAI 兼容接口（DeepSeek、Moonshot、智谱等）
+- OpenAI
+- Ollama（本地或局域网）
 
-文件位置：`backend/app/resources/prompts/<目录>/v<版本>.md`。启动时扫描全部 `*/v*.md`。
+接口密钥保存在系统安全存储中。应用不会把密钥写入日志、备份清单或界面明文。
 
-## 3. 内置 Prompt
+## 2. 模型角色
 
-| key | 用途 | 主要变量 |
+- **默认翻译模型**：逐句翻译、单句重译。
+- **默认问答模型**：知识抽取、AI 解释、阅读助手。
+
+模型配置包含：
+
+- 模型标识（API 使用的 `model` 字段）
+- 显示名称
+- 上下文长度
+- 最大输出
+- 超时
+- 能力（翻译/问答与抽取）
+- 是否支持结构化 JSON 输出
+- 默认翻译/默认问答标记
+
+## 3. 提示词目录
+
+提示词保存在 SQLite 的 `prompt_templates` 表，支持版本、编辑与启用/回滚。
+
+| key | 名称 | 用途 |
 | --- | --- | --- |
-| `translation` | 文言文 → 现代汉语（Balanced） | book_title, author, dynasty, chapter_title, context_before/after, items_json |
-| `assistant` | 阅读助手问答，JSON 回答 + citations/claims | book_title, author, chapter_title, context, knowledge_context, history, question |
-| `sentence_explain` | 句子释义 | original, translation, context, question |
-| `word_glossary` | 词语释义 | word, sentence |
-| `historical_background` | 历史背景解释 | context, question |
-| `entity_extract` | 人物/地名/职官等实体抽取 | paragraphs_json |
-| `relation_extract` | 人物关系抽取 | entities_json, paragraphs_json |
-| `event_extract` | 历史事件抽取 | paragraphs_json |
-| `conflict_analysis` | 不同史料冲突比较 | subject, sources_json |
-| `quality_review` | 译文质量检查 | original, translation, context |
+| `translation` | 文言文翻译（均衡） | 章节分批翻译，返回 JSON 译文 |
+| `sentence_explain` | 句子释义 | 难词、句式、典故与含义 |
+| `entity_extract` | 历史人物与实体抽取 | 人物/地点/职官/机构/典籍 |
+| `relation_extract` | 人物关系抽取 | 关系类型与原文证据 |
+| `event_extract` | 历史事件抽取 | 事件、纪年、参与者、出处 |
+| `assistant` | 古籍阅读助手 | 检索增强问答、引用与 claims |
+| `review` | 翻译质量检查 | 漏译、误译、增译、语气 |
+| `word_glossary` | 词语释义 | 语境义与用法 |
+| `historical_background` | 历史背景解释 | 制度、职官、地理、年代 |
+| `conflict_analysis` | 史料冲突分析 | 多史料一致与冲突 |
 
-## 4. 翻译 JSON 契约
+## 4. 输出约束
 
-模型必须只返回：
+结构化提示词要求模型只返回 JSON。应用会：
 
-```json
-{
-  "translations": [
-    { "id": "sentence uuid", "text": "现代汉语译文", "uncertain": false, "note": "" }
-  ]
-}
-```
+1. 去除 Markdown 围栏。
+2. 截取第一个 `{` 到最后一个 `}`。
+3. 解析失败时明确报错，不伪造结果。
+4. 译文按 `sentence_id` 关联原文；缺失译文的句子标记失败。
+5. 实体/关系/事件保留原文证据；证据缺失或无法匹配时仍保留抽取结果但待审核。
 
-处理规则：
+## 5. 审核与保护
 
-- 严格校验 id；未返回的句子标记失败，不猜测内容。
-- 代码围栏会被剥离；非法 JSON 会触发一次“只输出合法 JSON”的修复请求。
-- 修复仍失败 → 批次失败，任务记录失败句子；可重新发起任务。
-- 翻译结果去除首尾空白；人工译文永不被覆盖。
-- 请求中的 items 是批量句子；批大小由模型上下文、最大输出与配置动态计算，不会一次发送整章。
+- AI 翻译不会覆盖人工译文。
+- 重新翻译已有 AI 译文时，旧译文保留，新译文进入 `translation_reviews`。
+- 采用候选后写入新版本，并保留历史版本。
+- 知识抽取的实体、关系、事件默认待审核；用户可在人物资料、图谱、时间线中确认或驳回。
 
-## 5. 上下文与缓存
+## 6. 本地缓存
 
-- Prompt 包含章节标题、书籍/作者/朝代、前后文与本批句子。
-- 缓存 key 包含：原文 hash、段落上下文 hash、Provider、Model、Prompt 版本、温度等参数。
-- 上下文变化会改变 key，避免“同一句在不同语境复用错误译文”。
-- 缓存只复用 AI 译文；人工修订不会进入自动缓存覆盖流程。
+翻译缓存以模型标识与完整提示词计算哈希，保存在 `translation_cache`。相同内容重复翻译时优先读取缓存，减少 API 调用。
 
-## 6. API
+## 7. 隐私
 
-```http
-GET  /api/v1/ai/prompts
-GET  /api/v1/ai/prompts/translation
-POST /api/v1/ai/prompts/translation/versions
-{
-  "name": "翻译 v2",
-  "template": "... {{items_json}} ...",
-  "variables": ["items_json"],
-  "description": "可选"
-}
-POST /api/v1/ai/prompts/translation/activate/1
-```
-
-创建新版本会自动停用旧版本；启用旧版本会保留全部历史。
-
-## 7. 安全与质量
-
-- Prompt 中不得加入 API Key、用户隐私或服务器密钥。
-- Provider 原始响应只写入数据库的译文/候选/错误摘要；日志会过滤敏感模式。
-- Prompt 要求模型区分原文明示、合理推断、AI 分析与证据不足，避免把推断当史实。
-- 质量审校 Prompt 已提供；当前 UI 尚未接入“一键质量检查”，可通过 API/服务层扩展。
+- 原文与知识库数据默认不离开设备。
+- 只有使用 AI 功能时，相关章节上下文才会发送到用户配置的服务商。
+- 没有隐藏遥测或内置 API Key。

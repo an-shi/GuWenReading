@@ -1,107 +1,123 @@
 # 古文阅读器
 
-古文阅读器是一个本地优先的 AI 古籍阅读与研究工具：导入古籍，保留原文，逐句对照翻译，并围绕人物、关系与历史事件建立可追溯的知识库。
+古文阅读器是一个**本地优先、单机独立运行**的古籍阅读与研究工具。桌面端与移动端使用同一套 Flutter 代码和本地 Dart 核心，不需要安装、启动或连接任何后端服务。
 
-本项目包含三个完整客户端/服务组件：
+导入古籍后，应用会在本机完成章节识别、段落构建、逐句切分、全文检索索引、AI 翻译、知识抽取与备份。原文始终保留，译文按句子精确关联，AI 抽取的人物、关系与事件保留原文证据并默认处于待审核状态。
 
-- `backend/` — Python 3.12 · FastAPI · SQLAlchemy 2 · SQLite FTS5（可选 PostgreSQL）
-- `desktop/` — Tauri 2 · Vue 3 · TypeScript · Vuetify 3 · AntV G6 · ECharts
-- `mobile/` — Flutter · Riverpod · Dio · SQLite 本地缓存（Android / iOS 同一套代码）
+## 核心特性
 
-## 当前状态
+- **完全独立运行**：桌面端与 APP 各自拥有本地 SQLite 数据库，不依赖服务器、账户或网络服务。
+- **古籍导入**：TXT、EPUB、DOCX、文本型 PDF；原文件与提取文本均保存在本机。
+- **精确阅读**：章节、段落、句子偏移；原文/译文交替、原文优先、逐句对照、桌面双栏。
+- **AI 翻译**：OpenAI 兼容接口或 Ollama；逐句翻译、分批上下文、缓存、人工修订保护、候选审核、版本历史。
+- **知识研究**：人物/地点/职官/机构/典籍抽取，人物关系图谱，历史时间线，原文证据与审核状态。
+- **全文检索**：SQLite FTS5；不支持 FTS5 的平台自动回退到 LIKE 检索。
+- **AI 阅读助手**：结合当前章节、本地检索结果与知识库回答，区分原文明示、推断、分析与证据不足。
+- **本地备份**：一键创建完整 ZIP 备份，支持导出、恢复与恢复前数据库副本。
+- **全中文界面**：暖色纸张阅读风格，品牌名“古文阅读器”。
 
-已在当前开发环境实际实现并验证：
+## 项目结构
 
-- 书籍导入：TXT / EPUB / DOCX / 文本型 PDF，内容 SHA-256 去重，原文件完整保留。
-- 原文派生：章节识别、段落、句子、字符偏移、规范化文本分层；原始段落/句子永不被翻译覆盖。
-- AI 配置：多 Provider、多模型、默认翻译/问答模型、API Key 加密存储、连接测试。
-- Prompt：独立文件 + 数据库版本管理，译文记录 Prompt 版本。
-- 翻译：章节级任务、动态分批、上下文、缓存、重试、取消、持久化进度、人工译文保护、候选译文审核。
-- 阅读器：Windows 双栏句级对应；移动端四种阅读模式；书签、批注、阅读进度按设备保存。
-- 知识库：人物、别名、消歧合并、人物关系、史料证据、事件、纪年标准化、时间线。
-- 检索：SQLite FTS5 中文全文检索（原文/译文），实体与事件检索。
-- AI 助手：基于当前章节、检索到的本地史料回答，输出 citations / claims / 本地来源。
-- 同步：设备注册、增量 push/pull、冲突记录与解决、人工译文优先规则；单机模式可选关闭。
-- 备份：完整数据 ZIP 备份与停服恢复脚本。
-
-严格的环境限制（未完成即未声称完成）：
-
-- Tauri 原生壳已编写，但当前机器没有 Rust/Cargo，**未编译 Windows 安装包**。
-- **iOS 无法在 Windows 上构建/签名**，只提供工程与构建说明。
-- Android 调试 APK 的构建结果见 `docs/TEST_REPORT.md`。
-- 扫描版 PDF 的 OCR 未实现：会明确报错，不会伪造文本。
-- 向量检索 / RAG 尚未实现；当前为 FTS5 + 史料检索。
-
-## 快速开始
-
-### 1. Python 后端
-
-```powershell
-py -3.12 -m venv .venv
-.\.venv\Scripts\python.exe -m pip install -r backend\requirements.txt
-cd backend
-..\.venv\Scripts\python.exe -m app
+```text
+app/                统一的 Flutter 桌面/移动应用
+  lib/
+    core/local/     本地核心：SQLite、文档解析、AI、翻译、知识、检索、备份
+    data/           数据模型与本地仓库
+    features/       书架、详情、阅读器、检索、知识、图谱、时间线、任务、设置
+    app/            应用壳、主题与响应式导航
+  test/             本地核心与应用测试
+docs/               架构、数据库、本地核心、提示词、构建与测试文档
 ```
 
-- API 文档：http://127.0.0.1:8765/docs
-- 默认数据目录：`%APPDATA%\古文阅读器`
-- 测试：`cd backend; ..\.venv\Scripts\python.exe -m pytest -q`
+## 运行
 
-### 2. Windows 桌面端（Web 前端）
+### 桌面端（Windows）
 
 ```powershell
-cd desktop\frontend
-npm install
-npm run dev
-```
-
-打开 http://127.0.0.1:1420 。默认连接 `http://127.0.0.1:8765/api/v1`，可在“设置 → 服务与同步”修改。
-
-Tauri 原生壳位于 `desktop/src-tauri/`。安装 Rust/Cargo 后：
-
-```powershell
-cd desktop\src-tauri
-cargo tauri build
-```
-
-### 3. Android / iOS
-
-```powershell
-cd mobile
+cd app
 flutter pub get
-flutter run -d <device>
+flutter run -d windows
 ```
 
-Android 模拟器默认后端地址为 `http://10.0.2.2:8765/api/v1`；真机请在“我的 → 后端服务”填写电脑局域网 IP。iOS 模拟器默认 `127.0.0.1`。
+要求：
 
-## 设计原则
+- Flutter 3.47+、Visual Studio（Windows Desktop C++ 工具链）。
+- **Windows 必须开启“开发者模式”**，Flutter 插件构建需要符号链接支持。
+- 首次构建会编译 SQLite/PDFium 等原生依赖，耗时较长。
 
-1. **原文完整保留**：翻译、繁简转换和检索均不修改原始文本；句子/段落保存提取文本中的精确字符偏移。
-2. **译文精确关联**：译文按 sentence id 与原文关联，不使用滚动比例猜测对应关系。
-3. **知识有据可查**：AI 抽取的实体、关系、事件保留句子证据和审核状态；推断不会自动变成事实。
-4. **本地优先**：桌面内置后端；移动端缓存书籍章节、译文、批注和进度，可离线阅读。
-5. **云端可选**：不配置服务器也能阅读；配置 Server 模式后启用多设备同步。
-6. **模型可替换**：Provider 适配层不绑定任何厂商；OpenAI 兼容接口和 Ollama 均可配置。
+### Android
+
+```powershell
+cd app
+flutter pub get
+flutter run -d <android-device>
+```
+
+构建调试 APK：
+
+```powershell
+flutter build apk --debug
+```
+
+### iOS / macOS
+
+需要 macOS + Xcode。工程已包含 `ios/` 平台配置，未在 Windows 上构建验证。
+
+## AI 配置
+
+打开“我的 → AI 模型”：
+
+1. 添加服务商：OpenAI 兼容接口、OpenAI 或 Ollama。
+2. 添加模型，设置模型标识、上下文长度、最大输出与超时。
+3. 分别指定默认翻译模型与默认问答模型。
+
+接口密钥保存在系统安全存储中；不会写入日志、导出文件或界面明文。
+
+## 数据与备份
+
+默认数据目录：
+
+- Windows：应用支持目录（通常位于 `%APPDATA%` 下）中的“古文阅读器”
+- Android：应用私有支持目录下的“古文阅读器”
+- iOS：应用支持目录下的“古文阅读器”
+
+目录包含：
+
+```text
+guwen.db        SQLite 数据库
+books/          原始书籍文件
+covers/         封面
+backups/        备份 ZIP 与恢复前数据库副本
+tmp/            解析与备份临时文件
+```
+
+备份文件名为 `古文阅读器备份-YYYYMMDD-HHMMSS.zip`。恢复会覆盖当前数据库与书籍文件，并在 `backups/` 中保留恢复前数据库副本。
+
+## 功能边界
+
+- 扫描版 PDF 的 OCR 未实现；没有可提取文字的 PDF 会被明确拒绝。
+- 桌面端与移动端不自动同步。需要在设备间迁移时，使用备份导出/恢复。
+- 关系与事件的人工创建/编辑尚未在 UI 中全部开放，AI 抽取结果可审核。
+- Windows 安装包需要在开启开发者模式后执行 `flutter build windows`；Android release 签名需自行配置。
+- 真实第三方 AI 服务需要在“AI 模型”中填写你自己的密钥；项目不包含隐藏 API Key 或遥测。
+
+## 测试
+
+```powershell
+cd app
+flutter analyze
+flutter test
+```
+
+测试覆盖 TXT/EPUB/DOCX 导入、章节/句子构建、全文检索、人工译文保护、候选审核、批注/书签/进度、备份创建与恢复。
 
 ## 文档
 
 - [架构](docs/ARCHITECTURE.md)
 - [数据库](docs/DATABASE.md)
-- [API](docs/API.md)
-- [AI Prompt](docs/AI_PROMPTS.md)
+- [本地核心](docs/LOCAL_CORE.md)
+- [AI 提示词](docs/AI_PROMPTS.md)
 - [构建与发布](docs/BUILD.md)
-- [开发计划与完成情况](docs/DEVELOPMENT_PLAN.md)
+- [开发计划](docs/DEVELOPMENT_PLAN.md)
 - [测试报告](docs/TEST_REPORT.md)
-- [桌面端说明](desktop/README.md)
-- [移动端说明](mobile/README.md)
-
-## 安全与隐私
-
-- API Key 在 Windows 上使用 DPAPI 加密；服务器模式使用由 `GUWEN_SECRET_KEY` 派生的 Fernet 密钥；不会出现在 API 响应、日志或错误消息中。
-- 日志会过滤 `sk-*`、Authorization、api_key 等敏感模式。
-- 所有 AI 调用都由用户自己配置的 Provider 发起；项目不含隐藏遥测。
-- 备份 ZIP 含完整原文与知识数据，请自行妥善保管。
-
-## License
-
-见 [LICENSE](LICENSE)。
+- [应用说明](app/README.md)

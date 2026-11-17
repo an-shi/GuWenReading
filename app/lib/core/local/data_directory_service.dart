@@ -22,11 +22,40 @@ class DataDirectoryService {
 
     final targetDir = Directory(target);
     await targetDir.create(recursive: true);
-    await _copyDirectory(Directory(source), targetDir);
+    if (await File(p.join(target, 'guwen.db')).exists() ||
+        await Directory(p.join(target, 'books')).exists() ||
+        await Directory(p.join(target, 'covers')).exists()) {
+      throw DataDirectoryException('目标目录包含旧版数据，请选择空目录或新建子目录');
+    }
+    final sourceLibrary = Directory(p.join(source, 'library'));
+    final sourceDatabase = Directory(p.join(source, 'database'));
+    final targetLibrary = Directory(p.join(target, 'library'));
+    final targetDatabase = Directory(p.join(target, 'database'));
+    await targetDatabase.create(recursive: true);
+    if (await sourceLibrary.exists()) {
+      await _copyDirectory(sourceLibrary, targetLibrary);
+    }
+    if (await sourceDatabase.exists()) {
+      await _copyDirectory(sourceDatabase, targetDatabase);
+    }
+    // Compatibility with data roots created before the library/database split.
+    for (final name in ['books', 'covers', 'backups', 'tmp']) {
+      final dir = Directory(p.join(source, name));
+      if (await dir.exists()) {
+        await _copyDirectory(dir, Directory(p.join(targetLibrary.path, name)));
+      }
+    }
+    for (final name in ['guwen.db', 'guwen.db-wal', 'guwen.db-shm']) {
+      final file = File(p.join(source, name));
+      if (await file.exists()) {
+        await file.copy(p.join(targetDatabase.path, name));
+      }
+    }
 
-    final sourceDb = File(p.join(source, 'guwen.db'));
+    final sourceDb = File(current.dbPath);
     if (await sourceDb.exists()) {
-      final targetDb = File(p.join(target, 'guwen.db'));
+      final relativeDb = p.relative(current.dbPath, from: source);
+      final targetDb = File(p.join(target, relativeDb));
       if (!await targetDb.exists()) {
         throw DataDirectoryException('数据库复制失败，未切换数据目录');
       }
@@ -35,8 +64,26 @@ class DataDirectoryService {
     final prefs = await SharedPreferences.getInstance();
     await prefs.setString(AppPaths.dataRootKey, target);
 
+    // Never delete the whole data root: on desktop it may also contain the
+    // Flutter runtime bundle (flutter_assets/data). Only remove our own data.
+    await _deleteQuietly(sourceLibrary);
+    await _deleteQuietly(sourceDatabase);
+    for (final name in ['books', 'covers', 'backups', 'tmp']) {
+      await _deleteQuietly(Directory(p.join(source, name)));
+    }
+    for (final name in ['guwen.db', 'guwen.db-wal', 'guwen.db-shm']) {
+      await _deleteQuietly(File(p.join(source, name)));
+    }
+  }
+
+  Future<void> _deleteQuietly(FileSystemEntity entity) async {
     try {
-      await Directory(source).delete(recursive: true);
+      if (!await entity.exists()) return;
+      if (entity is Directory) {
+        await entity.delete(recursive: true);
+      } else {
+        await entity.delete();
+      }
     } catch (_) {
       // The new copy is already usable; a locked old file can be removed later.
     }

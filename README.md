@@ -67,8 +67,8 @@ flutter build apk --debug
 
 打开“我的 → AI 模型”：
 
-1. 添加服务商：OpenAI 兼容接口、OpenAI 或 Ollama。
-2. 添加模型，设置模型标识、上下文长度、最大输出与超时。
+1. 添加服务商：可选择 OpenAI、DeepSeek、通义千问、豆包、Kimi、智谱、硅基流动、Gemini、Claude、OpenRouter、Ollama 等预设。
+2. 填写 API Key 后点击“获取模型”，勾选要使用的模型；应用会保存上下文长度与多模态能力。
 3. 分别指定默认翻译模型与默认问答模型。
 
 接口密钥保存在系统安全存储中；不会写入日志、导出文件或界面明文。
@@ -77,19 +77,20 @@ flutter build apk --debug
 
 默认数据目录：
 
-- Windows：应用支持目录（通常位于 `%APPDATA%` 下）中的“古文阅读器”
-- Android：应用私有支持目录下的“古文阅读器”
-- iOS：应用支持目录下的“古文阅读器”
+- Windows/Linux：安装目录下自动创建的 `data/`
+- Android/iOS/macOS：应用私有支持目录
 
 目录包含：
 
 ```text
-guwen.db        SQLite 数据库
-books/          原始书籍文件
-covers/         封面
-backups/        备份 ZIP 与恢复前数据库副本
-tmp/            解析与备份临时文件
+library/books/          原始书籍文件
+library/covers/         封面
+library/backups/        备份 ZIP 与恢复前数据库副本
+library/tmp/            解析与备份临时文件
+database/guwen.db       SQLite 数据库
 ```
+
+可在“设置 → 数据备份 → 更改数据目录”调整位置，迁移完成后自动重启。旧版 AppData 数据会在首次启动时复制到新目录。
 
 备份文件名为 `古文阅读器备份-YYYYMMDD-HHMMSS.zip`。恢复会覆盖当前数据库与书籍文件，并在 `backups/` 中保留恢复前数据库副本。
 

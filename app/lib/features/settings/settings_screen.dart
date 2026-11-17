@@ -11,6 +11,7 @@ import '../../core/local/app_database.dart';
 import '../../core/local/backup_service.dart';
 import '../../core/local/data_directory_service.dart';
 import '../../core/local/local_models.dart';
+import 'provider_editor.dart';
 import '../../core/providers.dart';
 import '../../core/storage/settings_controller.dart';
 import '../../providers.dart';
@@ -134,7 +135,8 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
       children: [
         _SectionCard(
           title: '模型服务商',
-          subtitle: '支持 OpenAI 兼容接口与 Ollama。密钥保存在系统安全存储中，仅本机可用。',
+          subtitle:
+              '支持 OpenAI 兼容、Anthropic、Gemini 与 Ollama；可读取服务商模型列表并识别多模态能力。',
           action: FilledButton.tonalIcon(
             onPressed: () => _editProvider(null),
             icon: const Icon(Icons.add),
@@ -155,7 +157,9 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
                         ),
                         title: Text(provider.name),
                         subtitle: Text(
-                          '${_providerKindLabel(provider.kind)} · ${provider.baseUrl}${provider.apiKey.isEmpty ? ' · 未配置密钥' : ' · 已配置密钥'}',
+                          '${_providerKindLabel(provider.kind)} · ${provider.baseUrl}'
+                          '${provider.apiKey.isEmpty ? ' · 未配置密钥' : ' · 已配置密钥'}'
+                          ' · ${_models.where((model) => model.providerId == provider.id).length} 个模型',
                           maxLines: 1,
                           overflow: TextOverflow.ellipsis,
                         ),
@@ -202,6 +206,7 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
                         title: Text(model.displayName),
                         subtitle: Text(
                           '${model.name} · ${model.contextWindow} 上下文 · ${model.maxOutputTokens} 输出'
+                          '${model.supports('vision') ? ' · 多模态' : ''}'
                           '${model.isDefaultTranslation ? ' · 默认翻译' : ''}'
                           '${model.isDefaultChat ? ' · 默认问答' : ''}',
                         ),
@@ -469,7 +474,8 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              _InfoRow(label: '数据目录', value: paths.root.path),
+              _InfoRow(label: '数据根目录', value: paths.root.path),
+              _InfoRow(label: '书籍与备份', value: paths.libraryDir.path),
               _InfoRow(label: '数据库', value: paths.dbPath),
               const SizedBox(height: 8),
               Wrap(
@@ -490,7 +496,7 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
               ),
               const SizedBox(height: 8),
               Text(
-                '更改目录会把数据库、原始书籍、封面和备份完整迁移到新位置，完成后需要重启应用。',
+                '默认存放在安装目录的 data/ 下：书籍与备份在 library/，数据库在 database/。更改目录会整体迁移并重启应用。',
                 style: theme.textTheme.bodySmall?.copyWith(
                   color: theme.colorScheme.onSurface.withValues(alpha: 0.45),
                 ),
@@ -570,110 +576,70 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
 
   // ----------------------------------------------------------------- dialogs
   Future<void> _editProvider(AiProviderRecord? provider) async {
-    final name = TextEditingController(text: provider?.name ?? '');
-    final baseUrl = TextEditingController(
-      text: provider?.baseUrl ?? 'https://api.openai.com/v1',
-    );
-    final apiKey = TextEditingController();
-    final notes = TextEditingController(text: provider?.notes ?? '');
-    var kind = provider?.kind ?? 'openai_compatible';
-    var enabled = provider?.enabled ?? true;
-    var clearKey = false;
-    final saved = await showDialog<bool>(
+    final ai = ref.read(aiSettingsProvider);
+    final result = await showDialog<ProviderEditorResult>(
       context: context,
-      builder: (context) => StatefulBuilder(
-        builder: (context, setDialogState) => AlertDialog(
-          title: Text(provider == null ? '添加服务商' : '编辑服务商'),
-          content: SingleChildScrollView(
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                TextField(
-                  controller: name,
-                  decoration: const InputDecoration(labelText: '名称'),
-                ),
-                const SizedBox(height: 10),
-                DropdownButtonFormField<String>(
-                  initialValue: kind,
-                  decoration: const InputDecoration(labelText: '类型'),
-                  items: const [
-                    DropdownMenuItem(
-                      value: 'openai_compatible',
-                      child: Text('OpenAI 兼容'),
-                    ),
-                    DropdownMenuItem(value: 'openai', child: Text('OpenAI')),
-                    DropdownMenuItem(value: 'ollama', child: Text('Ollama')),
-                  ],
-                  onChanged: (value) =>
-                      setDialogState(() => kind = value ?? kind),
-                ),
-                const SizedBox(height: 10),
-                TextField(
-                  controller: baseUrl,
-                  decoration: const InputDecoration(labelText: '接口基础地址'),
-                ),
-                const SizedBox(height: 10),
-                TextField(
-                  controller: apiKey,
-                  obscureText: true,
-                  decoration: InputDecoration(
-                    labelText: '接口密钥（可留空）',
-                    hintText: provider?.apiKey.isNotEmpty == true
-                        ? '已保存，留空则保持不变'
-                        : 'sk-...',
-                  ),
-                ),
-                if (provider?.apiKey.isNotEmpty == true)
-                  CheckboxListTile(
-                    contentPadding: EdgeInsets.zero,
-                    title: const Text('清除已保存的密钥'),
-                    value: clearKey,
-                    onChanged: (value) =>
-                        setDialogState(() => clearKey = value ?? false),
-                  ),
-                const SizedBox(height: 10),
-                TextField(
-                  controller: notes,
-                  decoration: const InputDecoration(labelText: '备注（可选）'),
-                ),
-                SwitchListTile(
-                  contentPadding: EdgeInsets.zero,
-                  title: const Text('启用该服务商'),
-                  value: enabled,
-                  onChanged: (value) => setDialogState(() => enabled = value),
-                ),
-              ],
-            ),
-          ),
-          actions: [
-            TextButton(
-              onPressed: () => Navigator.pop(context, false),
-              child: const Text('取消'),
-            ),
-            FilledButton(
-              onPressed: () => Navigator.pop(context, true),
-              child: const Text('保存'),
-            ),
-          ],
-        ),
+      barrierDismissible: false,
+      builder: (context) => ProviderEditorDialog(
+        ai: ai,
+        provider: provider,
+        existingModels: provider == null
+            ? const []
+            : _models
+                  .where((model) => model.providerId == provider.id)
+                  .toList(),
       ),
     );
-    if (saved != true) return;
-    final record = AiProviderRecord(
-      id: provider?.id ?? newLocalId('provider'),
-      name: name.text.trim().isEmpty ? '未命名服务商' : name.text.trim(),
-      kind: kind,
-      baseUrl: baseUrl.text.trim(),
-      apiKey: clearKey
-          ? ''
-          : (apiKey.text.trim().isEmpty
-                ? (provider?.apiKey ?? '')
-                : apiKey.text.trim()),
-      notes: notes.text.trim().isEmpty ? null : notes.text.trim(),
-      enabled: enabled,
-    );
-    await ref.read(aiSettingsProvider).saveProvider(record);
-    await _reload();
+    if (result == null) return;
+    try {
+      await ai.saveProvider(result.provider);
+      if (result.models.isNotEmpty) {
+        final allModels = await ai.models();
+        var hasTranslation = allModels.any(
+          (model) => model.isDefaultTranslation,
+        );
+        var hasChat = allModels.any((model) => model.isDefaultChat);
+        final existingNames = {
+          for (final model in allModels)
+            if (model.providerId == result.provider.id) model.name,
+        };
+        for (final remote in result.models) {
+          if (!existingNames.add(remote.id)) continue;
+          final defaultTranslation = !hasTranslation;
+          final defaultChat = !hasChat;
+          await ai.saveModel(
+            AiModelRecord(
+              id: newLocalId('model'),
+              providerId: result.provider.id,
+              name: remote.id,
+              displayName: remote.displayName,
+              contextWindow: remote.contextWindow ?? 8192,
+              maxOutputTokens: remote.maxOutputTokens ?? 2048,
+              timeoutSeconds: 120,
+              capabilities: [
+                'translation',
+                'chat',
+                if (remote.supportsVision) 'vision',
+              ],
+              supportsJson: true,
+              isDefaultTranslation: defaultTranslation,
+              isDefaultChat: defaultChat,
+              enabled: true,
+            ),
+          );
+          if (defaultTranslation) hasTranslation = true;
+          if (defaultChat) hasChat = true;
+        }
+      }
+      await _reload();
+      _toast(
+        result.models.isEmpty
+            ? '服务商已保存'
+            : '服务商与 ${result.models.length} 个模型已保存',
+      );
+    } catch (error) {
+      _toast('保存失败：$error', error: true);
+    }
   }
 
   Future<void> _deleteProvider(AiProviderRecord provider) async {
@@ -707,6 +673,7 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
   }
 
   Future<void> _editModel(AiModelRecord? model) async {
+    final theme = Theme.of(context);
     final providerId =
         model?.providerId ?? (_providers.isEmpty ? null : _providers.first.id);
     if (providerId == null) return;
@@ -801,11 +768,17 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
                 Wrap(
                   spacing: 8,
                   children: [
-                    for (final capability in const ['translation', 'chat'])
+                    for (final capability in const [
+                      'translation',
+                      'chat',
+                      'vision',
+                    ])
                       FilterChip(
-                        label: Text(
-                          capability == 'translation' ? '翻译' : '问答与抽取',
-                        ),
+                        label: Text(switch (capability) {
+                          'translation' => '翻译',
+                          'chat' => '问答与抽取',
+                          _ => '图片理解',
+                        }),
                         selected: capabilities.contains(capability),
                         onSelected: (selected) => setDialogState(() {
                           if (selected) {
@@ -816,6 +789,17 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
                         }),
                       ),
                   ],
+                ),
+                Padding(
+                  padding: const EdgeInsets.only(top: 4),
+                  child: Text(
+                    '多模态能力来自服务商的模型列表；勾选后可识别该模型是否支持图片输入。',
+                    style: theme.textTheme.bodySmall?.copyWith(
+                      color: theme.colorScheme.onSurface.withValues(
+                        alpha: 0.45,
+                      ),
+                    ),
+                  ),
                 ),
                 SwitchListTile(
                   contentPadding: EdgeInsets.zero,
@@ -1016,7 +1000,7 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
     }
     if (!await _confirm(
       '迁移数据目录？',
-      '将把数据库、原始书籍、封面、备份和临时文件迁移到：\n$target\n\n迁移完成后应用会重启。旧目录在迁移成功后会删除。',
+      '将把数据库、原始书籍、封面、备份和临时文件迁移到：\n$target\n\n迁移完成后应用会重启，旧目录中的应用数据会被清理。',
     )) {
       return;
     }
@@ -1128,6 +1112,7 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
 
   String _providerKindLabel(String kind) => switch (kind) {
     'openai' => 'OpenAI',
+    'anthropic' => 'Anthropic',
     'ollama' => 'Ollama',
     _ => 'OpenAI 兼容',
   };

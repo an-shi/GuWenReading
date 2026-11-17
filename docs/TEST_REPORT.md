@@ -67,11 +67,13 @@ flutter build windows --debug
 
 因此本轮未完成 Android 真实设备 UI 冒烟。Windows 端已通过 `flutter build windows --debug` 构建并启动；根据要求，不再扩展自动化测试或设备测试。
 
-### 2026-11-17 字体与数据目录调整
+### 2026-11-17 字体、数据目录与 AI 服务商调整
 
 - 全局字体统一为内置 Noto Sans SC（400/500/600/700），移除 `serif` 局部覆盖与提示词预览的 `monospace`。
 - 提示词与界面文案统一为简体中文；旧数据库中的英文 claim 枚举会自动生成中文提示词新版本。
+- 数据根目录默认改为安装目录的 `data/`：书籍与备份在 `library/`，数据库在 `database/`；旧 AppData 数据首次启动时自动复制。
 - 新增“更改数据目录”：迁移数据库、书籍、封面与备份，完成后提示并重启。
+- 新增 AI 服务商预设、模型列表读取与多模态能力识别；“添加服务商”改为分区式对话框。
 - 验证方式：`flutter analyze` 无问题，`flutter build windows --debug` 成功且应用可打开。
 
 ## 3. 验证过的核心路径

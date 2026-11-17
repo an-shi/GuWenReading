@@ -1,6 +1,6 @@
 # 本地核心接口
 
-最后更新：2026-11-16
+最后更新：2026-11-17
 
 应用没有 HTTP API。UI 通过 Riverpod 调用本地仓库与服务，所有方法在当前进程内执行。
 
@@ -12,7 +12,7 @@
 appDatabaseProvider       // AppDatabase
 localStoreProvider        // LocalStore（SQLite 读写）
 aiSettingsProvider        // AI 服务商/模型/提示词/密钥
-aiClientProvider          // OpenAI 兼容 / Ollama 请求
+aiClientProvider          // OpenAI 兼容 / Anthropic / Ollama 请求
 importServiceProvider     // 导入与解析
 translationServiceProvider
 knowledgeServiceProvider

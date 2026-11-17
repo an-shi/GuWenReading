@@ -7,19 +7,20 @@
 每个设备拥有独立数据库，无中心数据库。默认位置如下，可在设置中更改：
 
 ```text
-<应用支持目录>/<自定义目录或“古文阅读器”>/
-  guwen.db
-  books/<bookId>/original.<ext>
-  covers/<bookId>.img
-  backups/古文阅读器备份-*.zip
-  backups/restore-before-*.db
-  tmp/
+<安装目录>/data/
+  library/
+    books/<bookId>/original.<ext>
+    covers/<bookId>.img
+    backups/古文阅读器备份-*.zip
+    backups/restore-before-*.db
+    tmp/
+  database/guwen.db
 ```
 
-- Windows 应用支持目录（通常位于 `%APPDATA%` 下）中的 `古文阅读器/`。
+- Windows/Linux 默认使用可执行文件旁的 `data/`；不可写时退回应用支持目录。
 - Android/iOS 使用应用私有目录。
 - 自定义目录保存在 SharedPreferences 的 `data_root`；启动时优先读取该值。
-- 更改目录会关闭数据库、复制整个目录到新位置，成功后删除旧目录并重启应用。
+- 更改目录会关闭数据库，复制 `library/` 与 `database/` 到新位置，成功后清理旧目录中的应用数据并重启应用。
 - 数据库使用 SQLite WAL 模式（平台不允许时自动退回）。
 - 启动时执行 `PRAGMA foreign_keys = ON`。
 

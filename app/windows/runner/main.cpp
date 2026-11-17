@@ -27,7 +27,7 @@ int APIENTRY wWinMain(_In_ HINSTANCE instance, _In_opt_ HINSTANCE prev,
   FlutterWindow window(project);
   Win32Window::Point origin(10, 10);
   Win32Window::Size size(1280, 720);
-  if (!window.Create(L"古文阅读器", origin, size)) {
+  if (!window.Create(L"\u53E4\u6587\u9605\u8BFB\u5668", origin, size)) {
     return EXIT_FAILURE;
   }
   window.SetQuitOnClose(true);

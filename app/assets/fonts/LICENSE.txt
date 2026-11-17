@@ -1,7 +1,7 @@
 Noto Sans SC
 ============
 
-This application bundles static instances (weights 400, 600 and 700) of
+This application bundles static instances (weights 400, 500, 600 and 700) of
 Noto Sans SC, derived from the Noto Sans SC variable font.
 
 Noto Sans SC is licensed under the SIL Open Font License, Version 1.1.

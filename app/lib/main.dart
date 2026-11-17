@@ -40,6 +40,11 @@ class _StartupErrorApp extends StatelessWidget {
     return MaterialApp(
       title: '古文阅读器',
       debugShowCheckedModeBanner: false,
+      theme: ThemeData(
+        useMaterial3: true,
+        fontFamily: 'NotoSansSC',
+        fontFamilyFallback: const ['Microsoft YaHei', 'PingFang SC'],
+      ),
       home: Scaffold(
         body: Center(
           child: ConstrainedBox(

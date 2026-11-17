@@ -69,7 +69,7 @@ flutter build windows --debug
 
 ### 2026-11-17 字体与数据目录调整
 
-- 全局字体统一为内置 Noto Sans SC（400/600/700），移除 `serif` 局部覆盖与提示词预览的 `monospace`。
+- 全局字体统一为内置 Noto Sans SC（400/500/600/700），移除 `serif` 局部覆盖与提示词预览的 `monospace`。
 - 提示词与界面文案统一为简体中文；旧数据库中的英文 claim 枚举会自动生成中文提示词新版本。
 - 新增“更改数据目录”：迁移数据库、书籍、封面与备份，完成后提示并重启。
 - 验证方式：`flutter analyze` 无问题，`flutter build windows --debug` 成功且应用可打开。

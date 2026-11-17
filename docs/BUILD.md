@@ -11,7 +11,7 @@
 
 项目只有一个 Flutter 应用：`app/`。没有 Python、Node 后端或 Tauri。
 
-界面字体随应用打包在 `app/assets/fonts/`（Noto Sans SC 400/600/700，SIL OFL 许可），无需依赖系统字体。
+界面字体随应用打包在 `app/assets/fonts/`（Noto Sans SC 400/500/600/700，SIL OFL 许可），无需依赖系统字体。
 
 ## 2. 依赖
 

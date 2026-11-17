@@ -35,7 +35,7 @@
 
 - `app/lib/features/`：书架、书籍详情、阅读器、检索、知识库、图谱、时间线、任务、设置。
 - `app/lib/app/shell/app_shell.dart`：宽屏使用 `NavigationRail`，窄屏使用底部导航。
-- `app/lib/app/theme.dart`：暖色纸张主题、墨绿与黄铜色；全局统一使用内置 Noto Sans SC（400/600/700），界面文案使用简体中文。
+- `app/lib/app/theme.dart`：暖色纸张主题、墨绿与黄铜色；全局统一使用内置 Noto Sans SC（400/500/600/700），界面文案使用简体中文。
 
 ### 2.2 状态与仓库层
 

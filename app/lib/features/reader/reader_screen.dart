@@ -54,11 +54,21 @@ class _ReaderScreenState extends ConsumerState<ReaderScreen>
   bool _translating = false;
   Sentence? _lastSentence;
   bool _bookmarked = false;
+  bool _modeInitialized = false;
 
   @override
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
+    _positionsListener.itemPositions.addListener(_onPositionsChanged);
+    _load(initial: true);
+  }
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    if (_modeInitialized) return;
+    _modeInitialized = true;
     final settings = ref.read(settingsProvider);
     final preferred = ReaderMode.fromKey(settings.defaultReadingMode);
     final wide = MediaQuery.sizeOf(context).width >= 1000;
@@ -67,8 +77,6 @@ class _ReaderScreenState extends ConsumerState<ReaderScreen>
         (wide && preferred == ReaderMode.alternating
             ? ReaderMode.columns
             : preferred);
-    _positionsListener.itemPositions.addListener(_onPositionsChanged);
-    _load(initial: true);
   }
 
   @override

@@ -110,7 +110,6 @@ class _AppShellState extends State<AppShell> {
                       child: Text(
                         '古',
                         style: TextStyle(
-                          fontFamily: 'serif',
                           color: Colors.white,
                           fontSize: 24,
                           fontWeight: FontWeight.w600,
@@ -122,10 +121,7 @@ class _AppShellState extends State<AppShell> {
                     const SizedBox(height: 8),
                     const Text(
                       '古文阅读器',
-                      style: TextStyle(
-                        fontFamily: 'serif',
-                        fontWeight: FontWeight.w600,
-                      ),
+                      style: TextStyle(fontWeight: FontWeight.w600),
                     ),
                   ],
                 ],

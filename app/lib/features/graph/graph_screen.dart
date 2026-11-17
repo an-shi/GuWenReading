@@ -286,7 +286,6 @@ class _GraphScreenState extends ConsumerState<GraphScreen> {
               child: Text(
                 item.label,
                 style: TextStyle(
-                  fontFamily: 'serif',
                   fontSize: 13,
                   color: theme.colorScheme.onSurface,
                 ),

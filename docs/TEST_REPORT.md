@@ -1,6 +1,6 @@
 # 测试报告
 
-日期：2026-11-16
+日期：2026-11-17
 
 ## 1. 自动化测试
 
@@ -54,23 +54,25 @@ cd app
 flutter build windows --debug
 ```
 
-结果：**未完成**。
+结果：构建成功，产物 `app/build/windows/x64/runner/Debug/guwenreader.exe` 可正常启动。
 
-```text
-Building with plugins requires symlink support.
-Please enable Developer Mode in your system settings.
-```
-
-当前 Windows 账户无管理员权限，无法通过注册表开启开发者模式。需要在系统中手动开启后重新构建。
+- 窗口标题“古文阅读器”使用 Unicode 转义，避免系统代码页 936 下的编译错误。
+- `Runner.rc` 元数据使用 ASCII，避免资源编译器编码问题。
 
 ## 2. UI 冒烟
 
 当前环境限制：
 
-- Windows 构建被开发者模式阻塞。
 - Android 模拟器启动后保持 offline，未成功连接设备。
 
-因此本轮未完成真实设备 UI 冒烟。已通过 `flutter analyze`、10 项自动化测试（含移动端/桌面端应用壳 widget 测试）和 APK 构建验证代码路径；真实设备 UI 运行验证需在开启开发者模式或可用 Android 设备后补做。
+因此本轮未完成 Android 真实设备 UI 冒烟。Windows 端已通过 `flutter build windows --debug` 构建并启动；根据要求，不再扩展自动化测试或设备测试。
+
+### 2026-11-17 字体与数据目录调整
+
+- 全局字体统一为内置 Noto Sans SC（400/600/700），移除 `serif` 局部覆盖与提示词预览的 `monospace`。
+- 提示词与界面文案统一为简体中文；旧数据库中的英文 claim 枚举会自动生成中文提示词新版本。
+- 新增“更改数据目录”：迁移数据库、书籍、封面与备份，完成后提示并重启。
+- 验证方式：`flutter analyze` 无问题，`flutter build windows --debug` 成功且应用可打开。
 
 ## 3. 验证过的核心路径
 
@@ -84,7 +86,7 @@ Please enable Developer Mode in your system settings.
 
 ## 4. 未验证 / 环境限制
 
-- **Windows 桌面运行**：开发者模式未开启。
+- **Windows 桌面运行**：已构建并启动，字体与数据目录迁移流程待人工逐页确认。
 - **Android/iOS UI 冒烟**：模拟器未连接，iOS 需要 macOS。
 - **真实 AI 服务**：没有第三方 API Key；翻译、知识抽取、助手的 HTTP/JSON 路径未做真实服务端到端验证。
 - **PDF 文字提取运行**：代码已接入 pdfrx/PDFium，APK 中包含原生库，但未在设备上实测文本型 PDF。

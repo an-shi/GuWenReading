@@ -411,7 +411,6 @@ class _BookHeader extends StatelessWidget {
                     Text(
                       book.title,
                       style: theme.textTheme.headlineSmall?.copyWith(
-                        fontFamily: 'serif',
                         fontWeight: FontWeight.w600,
                       ),
                     ),
@@ -534,7 +533,6 @@ class _ChapterTile extends StatelessWidget {
                           maxLines: 1,
                           overflow: TextOverflow.ellipsis,
                           style: theme.textTheme.titleSmall?.copyWith(
-                            fontFamily: 'serif',
                             fontWeight: isCurrent
                                 ? FontWeight.w700
                                 : FontWeight.w500,
@@ -633,7 +631,6 @@ class _MiniCover extends StatelessWidget {
           child: Text(
             title.length > 8 ? title.substring(0, 8) : title,
             style: const TextStyle(
-              fontFamily: 'serif',
               color: Color(0xFFF4EBDD),
               fontSize: 26,
               height: 1.1,
@@ -662,7 +659,6 @@ class _MiniStat extends StatelessWidget {
         Text(
           value,
           style: theme.textTheme.titleMedium?.copyWith(
-            fontFamily: 'serif',
             fontWeight: FontWeight.w700,
             fontSize: 18,
           ),

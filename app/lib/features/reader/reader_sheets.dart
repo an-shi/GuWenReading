@@ -187,7 +187,6 @@ Future<String?> showTocSheet(
                       title: Text(
                         chapter.title,
                         style: theme.textTheme.bodyMedium?.copyWith(
-                          fontFamily: 'serif',
                           fontWeight: active
                               ? FontWeight.w700
                               : FontWeight.w500,
@@ -257,7 +256,6 @@ Future<void> showParagraphSheet(
               Text(
                 paragraph.originalText,
                 style: TextStyle(
-                  fontFamily: 'serif',
                   fontSize: 17,
                   height: 1.9,
                   color: theme.colorScheme.onSurface.withValues(alpha: 0.85),
@@ -576,7 +574,6 @@ class _SentenceSheetState extends ConsumerState<_SentenceSheet> {
               child: Text(
                 sentence.originalText,
                 style: TextStyle(
-                  fontFamily: 'serif',
                   fontSize: 17,
                   height: 1.9,
                   color: theme.colorScheme.onSurface.withValues(alpha: 0.9),
@@ -775,7 +772,6 @@ class _SentenceSheetState extends ConsumerState<_SentenceSheet> {
                                 style: const TextStyle(
                                   fontSize: 12.5,
                                   height: 1.7,
-                                  fontFamily: 'serif',
                                 ),
                               ),
                             ],
@@ -1043,9 +1039,7 @@ class _AssistantSheetState extends ConsumerState<_AssistantSheet> {
                       children: [
                         Text(
                           'AI 阅读助手',
-                          style: theme.textTheme.titleMedium?.copyWith(
-                            fontFamily: 'serif',
-                          ),
+                          style: theme.textTheme.titleMedium?.copyWith(),
                         ),
                         Text(
                           '${widget.content.bookTitle} · ${widget.content.chapterTitle}',
@@ -1079,7 +1073,6 @@ class _AssistantSheetState extends ConsumerState<_AssistantSheet> {
                         Text(
                           '“知之为知之，不知为不知。”',
                           style: theme.textTheme.titleMedium?.copyWith(
-                            fontFamily: 'serif',
                             color: theme.colorScheme.onSurface.withValues(
                               alpha: 0.65,
                             ),
@@ -1296,11 +1289,7 @@ class _AssistantBubble extends StatelessWidget {
                       const SizedBox(height: 5),
                       Text(
                         citation.quote!,
-                        style: const TextStyle(
-                          fontSize: 12,
-                          height: 1.7,
-                          fontFamily: 'serif',
-                        ),
+                        style: const TextStyle(fontSize: 12, height: 1.7),
                       ),
                     ],
                     if (citation.note != null)
@@ -1324,16 +1313,17 @@ class _AssistantBubble extends StatelessWidget {
   }
 
   String _claimLabel(String kind) => switch (kind) {
-    'explicit' => '原文记载',
-    'inference' => '合理推断',
-    'analysis' => 'AI 分析',
+    'explicit' || '原文明确' => '原文明确',
+    'inference' || '合理推断' => '合理推断',
+    'analysis' || '分析' => '分析',
+    'unverified' || '证据不足' => '证据不足',
     _ => '证据不足',
   };
 
   Color _claimColor(ThemeData theme, String kind) => switch (kind) {
-    'explicit' => theme.colorScheme.primary,
-    'inference' => theme.colorScheme.tertiary,
-    'analysis' => theme.colorScheme.secondary,
+    'explicit' || '原文明确' => theme.colorScheme.primary,
+    'inference' || '合理推断' => theme.colorScheme.tertiary,
+    'analysis' || '分析' => theme.colorScheme.secondary,
     _ => theme.colorScheme.error,
   };
 }
@@ -1397,7 +1387,7 @@ class ChapterSearchDelegate extends SearchDelegate<int?> {
         return ListTile(
           title: Text(
             sentence.originalText,
-            style: const TextStyle(fontFamily: 'serif', fontSize: 14),
+            style: const TextStyle(fontSize: 14),
           ),
           subtitle: Text(
             '第 ${paragraphIndex + 1} 段 · ${sentence.translation?.text ?? '未翻译'}',

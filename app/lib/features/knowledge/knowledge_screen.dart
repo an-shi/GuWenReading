@@ -172,7 +172,6 @@ class _EntityCard extends StatelessWidget {
                 child: Text(
                   entity.name.isEmpty ? '?' : entity.name.substring(0, 1),
                   style: TextStyle(
-                    fontFamily: 'serif',
                     fontSize: 20,
                     color: theme.colorScheme.secondary,
                   ),
@@ -189,7 +188,6 @@ class _EntityCard extends StatelessWidget {
                           child: Text(
                             entity.name,
                             style: theme.textTheme.titleMedium?.copyWith(
-                              fontFamily: 'serif',
                               fontWeight: FontWeight.w600,
                             ),
                           ),
@@ -326,7 +324,6 @@ class _EventCard extends StatelessWidget {
                     Text(
                       _formatYear(event.timeStartYear!),
                       style: theme.textTheme.labelSmall?.copyWith(
-                        fontFamily: 'serif',
                         color: theme.colorScheme.secondary,
                       ),
                     ),
@@ -336,7 +333,6 @@ class _EventCard extends StatelessWidget {
               Text(
                 event.name,
                 style: theme.textTheme.titleMedium?.copyWith(
-                  fontFamily: 'serif',
                   fontWeight: FontWeight.w600,
                 ),
               ),
@@ -479,7 +475,6 @@ class EntityDetailScreen extends ConsumerWidget {
                   child: Text(
                     entity.name.isEmpty ? '?' : entity.name.substring(0, 1),
                     style: TextStyle(
-                      fontFamily: 'serif',
                       fontSize: 27,
                       color: theme.colorScheme.secondary,
                     ),
@@ -496,7 +491,6 @@ class EntityDetailScreen extends ConsumerWidget {
                             child: Text(
                               entity.name,
                               style: theme.textTheme.headlineSmall?.copyWith(
-                                fontFamily: 'serif',
                                 fontWeight: FontWeight.w600,
                               ),
                             ),
@@ -613,7 +607,6 @@ class _RelationCard extends ConsumerWidget {
               Text(
                 relation.otherName ?? '',
                 style: theme.textTheme.titleSmall?.copyWith(
-                  fontFamily: 'serif',
                   fontWeight: FontWeight.w600,
                 ),
               ),
@@ -647,11 +640,7 @@ class _RelationCard extends ConsumerWidget {
                 children: [
                   Text(
                     source.quote ?? '',
-                    style: const TextStyle(
-                      fontFamily: 'serif',
-                      fontSize: 11.5,
-                      height: 1.6,
-                    ),
+                    style: const TextStyle(fontSize: 11.5, height: 1.6),
                   ),
                   if (source.bookTitle != null)
                     Text(
@@ -731,7 +720,6 @@ class _MentionCard extends StatelessWidget {
             Text(
               mention.quote,
               style: theme.textTheme.bodySmall?.copyWith(
-                fontFamily: 'serif',
                 fontSize: 12.5,
                 height: 1.7,
                 color: theme.colorScheme.onSurface.withValues(alpha: 0.68),
@@ -798,7 +786,6 @@ class EventDetailScreen extends ConsumerWidget {
             Text(
               event.name,
               style: theme.textTheme.headlineSmall?.copyWith(
-                fontFamily: 'serif',
                 fontWeight: FontWeight.w600,
                 height: 1.3,
               ),
@@ -813,7 +800,6 @@ class EventDetailScreen extends ConsumerWidget {
               ].join(' · '),
               style: theme.textTheme.bodySmall?.copyWith(
                 color: theme.colorScheme.secondary,
-                fontFamily: 'serif',
               ),
             ),
             if (event.description != null) ...[
@@ -870,11 +856,7 @@ class EventDetailScreen extends ConsumerWidget {
                     children: [
                       Text(
                         source.quote ?? '',
-                        style: const TextStyle(
-                          fontFamily: 'serif',
-                          fontSize: 12,
-                          height: 1.7,
-                        ),
+                        style: const TextStyle(fontSize: 12, height: 1.7),
                       ),
                       if (source.bookTitle != null)
                         Padding(

@@ -3,6 +3,7 @@ import 'dart:io';
 import 'package:flutter/foundation.dart';
 import 'package:path/path.dart' as p;
 import 'package:path_provider/path_provider.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 import 'package:sqflite_common_ffi/sqflite_ffi.dart';
 import 'package:uuid/uuid.dart';
 
@@ -20,6 +21,8 @@ class AppPaths {
     required this.tmpDir,
   });
 
+  static const dataRootKey = 'data_root';
+
   final Directory root;
   final String dbPath;
   final Directory booksDir;
@@ -27,14 +30,25 @@ class AppPaths {
   final Directory backupsDir;
   final Directory tmpDir;
 
+  static Future<Directory> defaultRoot() async {
+    final base = await getApplicationSupportDirectory();
+    return Directory(p.join(base.path, '古文阅读器'));
+  }
+
+  static Future<Directory?> configuredRoot() async {
+    final prefs = await SharedPreferences.getInstance();
+    final value = prefs.getString(dataRootKey);
+    if (value == null || value.trim().isEmpty) return null;
+    return Directory(value);
+  }
+
   static Future<AppPaths> resolve({String? overrideRoot}) async {
-    final Directory base;
+    final Directory root;
     if (overrideRoot != null && overrideRoot.isNotEmpty) {
-      base = Directory(overrideRoot);
+      root = Directory(p.join(overrideRoot, '古文阅读器'));
     } else {
-      base = await getApplicationSupportDirectory();
+      root = await configuredRoot() ?? await defaultRoot();
     }
-    final root = Directory(p.join(base.path, '古文阅读器'));
     final books = Directory(p.join(root.path, 'books'));
     final covers = Directory(p.join(root.path, 'covers'));
     final backups = Directory(p.join(root.path, 'backups'));

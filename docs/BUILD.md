@@ -1,6 +1,6 @@
 # 构建与发布
 
-最后更新：2026-11-16
+最后更新：2026-11-17
 
 ## 1. 环境
 
@@ -10,6 +10,8 @@
 - iOS/macOS：Xcode（仅 macOS）
 
 项目只有一个 Flutter 应用：`app/`。没有 Python、Node 后端或 Tauri。
+
+界面字体随应用打包在 `app/assets/fonts/`（Noto Sans SC 400/600/700，SIL OFL 许可），无需依赖系统字体。
 
 ## 2. 依赖
 
@@ -86,10 +88,12 @@ flutter build ios
 
 ## 6. 数据目录
 
-- Windows：应用支持目录（通常位于 `%APPDATA%` 下）中的 `古文阅读器/`
-- Android/iOS：应用私有支持目录下的 `古文阅读器/`
+- 默认：应用支持目录下的 `古文阅读器/`
+  - Windows 通常位于 `%APPDATA%` 下
+  - Android/iOS 使用应用私有目录
+- 可在“设置 → 数据备份 → 更改数据目录”选择其他位置。
 
-数据库、原始书籍、封面、备份与临时文件均在此目录。
+数据库、原始书籍、封面、备份与临时文件均在此目录。迁移时会完整复制全部数据，完成后提示并重启应用。
 
 ## 7. 发布检查
 
@@ -106,7 +110,7 @@ flutter build ios
 
 ## 8. 已知构建限制
 
-- 当前 Windows 环境未开启开发者模式，`flutter build windows` 未完成验证。
+- Windows 开发者模式已开启，`flutter build windows --debug` 已成功构建并启动。
 - 当前环境没有可用的 Android 模拟器/真机，APK 只完成构建验证。
 - PDFium 首次构建需要下载原生库；网络不稳定时会重试。
 - 扫描版 PDF 的 OCR 未实现。

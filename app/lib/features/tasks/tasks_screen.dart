@@ -241,9 +241,7 @@ class _TaskCard extends StatelessWidget {
                         task.title,
                         maxLines: 2,
                         overflow: TextOverflow.ellipsis,
-                        style: theme.textTheme.titleSmall?.copyWith(
-                          fontFamily: 'serif',
-                        ),
+                        style: theme.textTheme.titleSmall?.copyWith(),
                       ),
                       const SizedBox(height: 4),
                       Row(

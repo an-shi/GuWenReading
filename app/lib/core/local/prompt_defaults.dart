@@ -167,7 +167,7 @@ const defaultPrompts = <DefaultPrompt>[
 要求：
 1. 优先依据提供的“当前章节原文”“本地知识库资料”和“对话历史”作答。
 2. 引用原文时给出简短原文，并说明出自哪本书、哪一章。
-3. 严格区分 explicit（原文明确）、inference（合理推断）、analysis（分析）、unverified（证据不足）。
+3. 严格区分四类信息：原文明确、合理推断、分析、证据不足。
 4. 不得编造原文、人物关系、年份或出处；没有依据时明确说明。
 5. 不同史书记载冲突时分别陈述，不强行统一。
 6. 使用现代汉语回答，简洁但信息完整。
@@ -188,8 +188,8 @@ const defaultPrompts = <DefaultPrompt>[
 【用户问题】
 {{question}}
 
-只输出 JSON，不要 Markdown 围栏：
-{"answer":"回答正文","citations":[{"book":"书名","chapter":"章节","quote":"原文摘录","note":"说明"}],"claims":[{"text":"结论","kind":"explicit|inference|analysis|unverified"}]}''',
+只输出 JSON，不要 Markdown 围栏。claims 的 kind 使用“原文明确”“合理推断”“分析”“证据不足”四类：
+{"answer":"回答正文","citations":[{"book":"书名","chapter":"章节","quote":"原文摘录","note":"说明"}],"claims":[{"text":"结论","kind":"原文明确|合理推断|分析|证据不足"}]}''',
   ),
   DefaultPrompt(
     key: 'review',

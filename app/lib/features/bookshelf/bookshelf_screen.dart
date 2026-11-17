@@ -426,7 +426,6 @@ class _BookCard extends ConsumerWidget {
                       maxLines: 2,
                       overflow: TextOverflow.ellipsis,
                       style: theme.textTheme.titleSmall?.copyWith(
-                        fontFamily: 'serif',
                         fontWeight: FontWeight.w600,
                         height: 1.25,
                       ),
@@ -515,7 +514,6 @@ class _CoverFallback extends StatelessWidget {
           child: Text(
             title.length > 12 ? title.substring(0, 12) : title,
             style: const TextStyle(
-              fontFamily: 'serif',
               color: Color(0xFFF4EBDD),
               fontSize: 34,
               height: 1.05,

@@ -116,11 +116,7 @@ class _SearchScreenState extends ConsumerState<SearchScreen> {
                       child: ListTile(
                         title: Text.rich(
                           _highlight(hit.text, _controller.text.trim(), theme),
-                          style: const TextStyle(
-                            fontFamily: 'serif',
-                            fontSize: 15,
-                            height: 1.7,
-                          ),
+                          style: const TextStyle(fontSize: 15, height: 1.7),
                         ),
                         subtitle: Padding(
                           padding: const EdgeInsets.only(top: 6),
@@ -165,13 +161,10 @@ class _SearchScreenState extends ConsumerState<SearchScreen> {
                                 .withValues(alpha: 0.09),
                             child: Text(
                               entity.name.characters.first,
-                              style: const TextStyle(fontFamily: 'serif'),
+                              style: const TextStyle(),
                             ),
                           ),
-                          title: Text(
-                            entity.name,
-                            style: const TextStyle(fontFamily: 'serif'),
-                          ),
+                          title: Text(entity.name, style: const TextStyle()),
                           subtitle: Text(
                             '${_kindLabel(entity.kind)}${entity.dynasty == null ? '' : ' · ${entity.dynasty}'}${entity.summary == null ? '' : '\n${entity.summary}'}',
                           ),
@@ -194,10 +187,7 @@ class _SearchScreenState extends ConsumerState<SearchScreen> {
                         margin: const EdgeInsets.only(bottom: 8),
                         child: ListTile(
                           leading: const Icon(Icons.event_note_outlined),
-                          title: Text(
-                            event.name,
-                            style: const TextStyle(fontFamily: 'serif'),
-                          ),
+                          title: Text(event.name, style: const TextStyle()),
                           subtitle: Text(
                             '${event.eventType}${event.timeRaw == null ? '' : ' · ${event.timeRaw}'}',
                           ),

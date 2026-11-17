@@ -29,39 +29,49 @@ ThemeData buildTheme(AppSettings settings) {
     useMaterial3: true,
     brightness: brightness,
     colorScheme: scheme,
+    fontFamily: 'NotoSansSC',
+    fontFamilyFallback: const [
+      'Microsoft YaHei',
+      'PingFang SC',
+      'Noto Sans CJK SC',
+      'Noto Sans SC',
+    ],
     scaffoldBackgroundColor: dark
         ? const Color(0xFF111815)
         : (paper ? paperBackground : const Color(0xFFF5F6F3)),
     visualDensity: VisualDensity.standard,
     splashFactory: InkSparkle.splashFactory,
   );
-  final serif = base.textTheme.copyWith(
+  final textTheme = base.textTheme.copyWith(
     displaySmall: base.textTheme.displaySmall?.copyWith(
-      fontFamily: 'serif',
-      fontWeight: FontWeight.w600,
+      fontWeight: FontWeight.w700,
       letterSpacing: 1,
     ),
     headlineMedium: base.textTheme.headlineMedium?.copyWith(
-      fontFamily: 'serif',
-      fontWeight: FontWeight.w600,
-      letterSpacing: 0.5,
+      fontWeight: FontWeight.w700,
+      letterSpacing: 0.4,
+    ),
+    headlineSmall: base.textTheme.headlineSmall?.copyWith(
+      fontWeight: FontWeight.w700,
     ),
     titleLarge: base.textTheme.titleLarge?.copyWith(
-      fontFamily: 'serif',
       fontWeight: FontWeight.w600,
     ),
     titleMedium: base.textTheme.titleMedium?.copyWith(
       fontWeight: FontWeight.w600,
     ),
+    titleSmall: base.textTheme.titleSmall?.copyWith(
+      fontWeight: FontWeight.w600,
+    ),
   );
   return base.copyWith(
-    textTheme: serif,
+    textTheme: textTheme,
     appBarTheme: AppBarTheme(
       backgroundColor: Colors.transparent,
       surfaceTintColor: Colors.transparent,
       elevation: 0,
       centerTitle: false,
-      titleTextStyle: serif.titleLarge?.copyWith(
+      titleTextStyle: textTheme.titleLarge?.copyWith(
         color: scheme.onSurface,
         fontSize: 20,
       ),

@@ -5,9 +5,11 @@ import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:intl/intl.dart';
+import 'package:path/path.dart' as p;
 
 import '../../core/local/app_database.dart';
 import '../../core/local/backup_service.dart';
+import '../../core/local/data_directory_service.dart';
 import '../../core/local/local_models.dart';
 import '../../core/providers.dart';
 import '../../core/storage/settings_controller.dart';
@@ -268,23 +270,31 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
             SizedBox(
-              width: 280,
+              width: 320,
               child: ListView(
-                padding: const EdgeInsets.fromLTRB(20, 8, 8, 40),
+                padding: const EdgeInsets.fromLTRB(20, 8, 12, 40),
                 children: [
                   for (final key in keys)
                     Card(
+                      margin: const EdgeInsets.only(bottom: 8),
                       color: key == _selectedPromptKey
                           ? theme.colorScheme.primary.withValues(alpha: 0.08)
                           : null,
                       child: ListTile(
-                        dense: true,
+                        contentPadding: const EdgeInsets.symmetric(
+                          horizontal: 14,
+                          vertical: 6,
+                        ),
                         title: Text(
                           grouped[key]!.first.name,
-                          maxLines: 1,
+                          maxLines: 2,
                           overflow: TextOverflow.ellipsis,
+                          style: const TextStyle(fontWeight: FontWeight.w600),
                         ),
-                        subtitle: Text('版本 ${grouped[key]!.first.version}'),
+                        subtitle: Padding(
+                          padding: const EdgeInsets.only(top: 3),
+                          child: Text('版本 ${grouped[key]!.first.version}'),
+                        ),
                         onTap: () => setState(() => _selectedPromptKey = key),
                       ),
                     ),
@@ -325,10 +335,9 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
         children: [
           SelectableText(
             active.template,
-            style: const TextStyle(
-              fontFamily: 'monospace',
-              fontSize: 12,
-              height: 1.7,
+            style: theme.textTheme.bodySmall?.copyWith(
+              fontSize: 12.5,
+              height: 1.75,
             ),
           ),
           const SizedBox(height: 18),
@@ -463,23 +472,28 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
               _InfoRow(label: '数据目录', value: paths.root.path),
               _InfoRow(label: '数据库', value: paths.dbPath),
               const SizedBox(height: 8),
-              Row(
+              Wrap(
+                spacing: 10,
+                runSpacing: 8,
                 children: [
                   OutlinedButton.icon(
                     onPressed: _busy ? null : _restoreBackup,
                     icon: const Icon(Icons.restore_rounded),
                     label: const Text('从备份恢复'),
                   ),
-                  const SizedBox(width: 10),
-                  Text(
-                    '恢复后当前页面可能需要重新进入。',
-                    style: theme.textTheme.bodySmall?.copyWith(
-                      color: theme.colorScheme.onSurface.withValues(
-                        alpha: 0.45,
-                      ),
-                    ),
+                  OutlinedButton.icon(
+                    onPressed: _busy ? null : _changeDataDirectory,
+                    icon: const Icon(Icons.drive_file_move_outline),
+                    label: const Text('更改数据目录'),
                   ),
                 ],
+              ),
+              const SizedBox(height: 8),
+              Text(
+                '更改目录会把数据库、原始书籍、封面和备份完整迁移到新位置，完成后需要重启应用。',
+                style: theme.textTheme.bodySmall?.copyWith(
+                  color: theme.colorScheme.onSurface.withValues(alpha: 0.45),
+                ),
               ),
               const SizedBox(height: 16),
               if (_backups.isEmpty)
@@ -969,6 +983,86 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
       }
     } catch (error) {
       _toast('导出失败：$error', error: true);
+    }
+  }
+
+  Future<void> _changeDataDirectory() async {
+    String? selected;
+    try {
+      selected = await FilePicker.getDirectoryPath(dialogTitle: '选择新的数据目录');
+    } catch (error) {
+      _toast('无法打开目录选择器：$error', error: true);
+      return;
+    }
+    if (selected == null || selected.trim().isEmpty) return;
+    final current = ref.read(appDatabaseProvider).paths;
+    final source = p.normalize(p.absolute(current.root.path));
+    final target = p.normalize(p.absolute(selected));
+    if (p.equals(source, target)) {
+      _toast('新目录与当前数据目录相同');
+      return;
+    }
+    if (p.isWithin(source, target) || p.isWithin(target, source)) {
+      _toast('新旧数据目录不能互相包含');
+      return;
+    }
+    final targetDir = Directory(target);
+    final nonEmpty =
+        await targetDir.exists() &&
+        (await targetDir.list().take(1).toList()).isNotEmpty;
+    if (nonEmpty &&
+        !await _confirm('目标目录非空', '所选目录已有文件。继续会合并文件，并覆盖同名数据库与书籍文件。是否继续？')) {
+      return;
+    }
+    if (!await _confirm(
+      '迁移数据目录？',
+      '将把数据库、原始书籍、封面、备份和临时文件迁移到：\n$target\n\n迁移完成后应用会重启。旧目录在迁移成功后会删除。',
+    )) {
+      return;
+    }
+    setState(() => _busy = true);
+    try {
+      final database = ref.read(appDatabaseProvider);
+      await database.close();
+      await DataDirectoryService().migrate(
+        current: current,
+        targetPath: target,
+      );
+      if (!mounted) return;
+      await showDialog<void>(
+        context: context,
+        barrierDismissible: false,
+        builder: (context) => AlertDialog(
+          title: const Text('迁移完成'),
+          content: Text('数据已迁移到：\n$target\n\n应用即将重启，请稍候。'),
+          actions: [
+            FilledButton(
+              onPressed: () => Navigator.pop(context),
+              child: const Text('立即重启'),
+            ),
+          ],
+        ),
+      );
+      await DataDirectoryService().restartApp();
+    } catch (error) {
+      if (!mounted) return;
+      await showDialog<void>(
+        context: context,
+        barrierDismissible: false,
+        builder: (context) => AlertDialog(
+          title: const Text('迁移失败'),
+          content: Text('$error\n\n应用将重启并继续使用原数据目录。'),
+          actions: [
+            FilledButton(
+              onPressed: () => Navigator.pop(context),
+              child: const Text('重启应用'),
+            ),
+          ],
+        ),
+      );
+      await DataDirectoryService().restartApp();
+    } finally {
+      if (mounted) setState(() => _busy = false);
     }
   }
 

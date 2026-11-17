@@ -250,7 +250,6 @@ class _NotesScreenState extends ConsumerState<NotesScreen> {
                                           child: Text(
                                             annotation.quote!,
                                             style: const TextStyle(
-                                              fontFamily: 'serif',
                                               fontSize: 12.5,
                                               height: 1.65,
                                             ),

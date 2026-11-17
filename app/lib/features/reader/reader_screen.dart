@@ -460,7 +460,7 @@ class _ReaderScreenState extends ConsumerState<ReaderScreen>
               content?.chapterTitle ?? widget.chapterTitle,
               maxLines: 1,
               overflow: TextOverflow.ellipsis,
-              style: theme.textTheme.titleMedium?.copyWith(fontFamily: 'serif'),
+              style: theme.textTheme.titleMedium?.copyWith(),
             ),
             Text(
               content?.bookTitle ?? widget.bookTitle,
@@ -849,10 +849,7 @@ class _ChapterFooter extends StatelessWidget {
               Expanded(child: Divider()),
               Padding(
                 padding: EdgeInsets.symmetric(horizontal: 12),
-                child: Text(
-                  '终',
-                  style: TextStyle(fontFamily: 'serif', fontSize: 13),
-                ),
+                child: Text('终', style: TextStyle(fontSize: 13)),
               ),
               Expanded(child: Divider()),
             ],

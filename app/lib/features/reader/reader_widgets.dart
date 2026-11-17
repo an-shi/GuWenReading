@@ -228,7 +228,6 @@ class ReaderParagraph extends StatelessWidget {
     return _SentenceFlow(
       paragraph: paragraph,
       style: TextStyle(
-        fontFamily: 'serif',
         fontSize: fontSize,
         height: lineHeight,
         color: theme.colorScheme.onSurface.withValues(alpha: 0.92),
@@ -289,7 +288,6 @@ class ReaderParagraph extends StatelessWidget {
                   Text(
                     sentence.originalText,
                     style: TextStyle(
-                      fontFamily: 'serif',
                       fontSize: fontSize,
                       height: lineHeight,
                       color: theme.colorScheme.onSurface.withValues(alpha: 0.9),

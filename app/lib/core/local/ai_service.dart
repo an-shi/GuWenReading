@@ -36,6 +36,39 @@ class AiSettingsService {
       if (keys.contains(prompt.key)) continue;
       await store.insertPrompt(prompt.toRecord());
     }
+    // Older local databases may still contain the English claim categories.
+    // Create a localized prompt version instead of mutating the user's history.
+    final prompts = await store.allPrompts();
+    final assistant = prompts
+        .where((prompt) => prompt.key == 'assistant' && prompt.isActive)
+        .firstOrNull;
+    if (assistant != null &&
+        RegExp(r'\b(explicit|inference|analysis|unverified)\b')
+            .hasMatch(assistant.template)) {
+      final versions = prompts.where((prompt) => prompt.key == 'assistant');
+      var nextVersion = 1;
+      for (final version in versions) {
+        if (version.version >= nextVersion) nextVersion = version.version + 1;
+      }
+      final localized = assistant.template
+          .replaceAll('explicit', '原文明确')
+          .replaceAll('inference', '合理推断')
+          .replaceAll('analysis', '分析')
+          .replaceAll('unverified', '证据不足');
+      await store.insertPrompt(
+        PromptRecord(
+          id: 'prompt-assistant-v$nextVersion-localized',
+          key: 'assistant',
+          version: nextVersion,
+          name: '${assistant.name}（简体中文）',
+          description: assistant.description,
+          template: localized,
+          variables: assistant.variables,
+          isActive: false,
+        ),
+      );
+      await store.activatePrompt('assistant', nextVersion);
+    }
   }
 
   Future<List<AiProviderRecord>> providers() async {

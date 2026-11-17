@@ -91,10 +91,7 @@ class _TimelineScreenState extends ConsumerState<TimelineScreen> {
                           margin: const EdgeInsets.only(bottom: 8),
                           child: ListTile(
                             leading: const Icon(Icons.help_outline_rounded),
-                            title: Text(
-                              event.name,
-                              style: const TextStyle(fontFamily: 'serif'),
-                            ),
+                            title: Text(event.name, style: const TextStyle()),
                             subtitle: Text(
                               '${event.eventType} · ${event.timeRaw ?? '原文未给出可换算时间'}',
                             ),
@@ -153,7 +150,7 @@ class _TimelineScreenState extends ConsumerState<TimelineScreen> {
                   child: Text(
                     detail.name,
                     style: Theme.of(context).textTheme.headlineSmall
-                        ?.copyWith(fontFamily: 'serif'),
+                        ?.copyWith(),
                   ),
                 ),
                 _StatusChip(status: detail.status),
@@ -203,10 +200,7 @@ class _TimelineScreenState extends ConsumerState<TimelineScreen> {
                     children: [
                       Text(
                         source.quote ?? '',
-                        style: const TextStyle(
-                          fontFamily: 'serif',
-                          height: 1.7,
-                        ),
+                        style: const TextStyle(height: 1.7),
                       ),
                       if (source.bookTitle != null)
                         Text(
@@ -410,10 +404,7 @@ class _TimelineRow extends StatelessWidget {
               padding: const EdgeInsets.symmetric(vertical: 6),
               child: Card(
                 child: ListTile(
-                  title: Text(
-                    event.name,
-                    style: const TextStyle(fontFamily: 'serif', fontSize: 16),
-                  ),
+                  title: Text(event.name, style: const TextStyle(fontSize: 16)),
                   subtitle: Text(
                     '${event.eventType}${event.timeRaw == null ? '' : ' · ${event.timeRaw}'}'
                     '${event.description == null ? '' : '\n${event.description}'}',

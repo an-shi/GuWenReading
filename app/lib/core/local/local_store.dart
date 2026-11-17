@@ -1,6 +1,8 @@
 import 'dart:convert';
+import 'dart:io';
 import 'dart:math' as math;
 
+import 'package:path/path.dart' as p;
 import 'package:sqflite/sqflite.dart';
 
 import '../../data/models.dart';
@@ -51,6 +53,187 @@ class LocalStore {
       where: 'id = ?',
       whereArgs: [bookId],
     );
+  }
+
+  /// Permanently removes a book and every local record derived from it.
+  ///
+  /// Chapters, paragraphs, sentences, translations, annotations, bookmarks and
+  /// reading progress are removed by foreign-key cascades. Knowledge records
+  /// are book-scoped through mentions/sources, so orphaned entities, relations
+  /// and events are cleaned up separately. Original files and covers are
+  /// deleted after the database transaction commits.
+  Future<void> deleteBookPermanently(String bookId) async {
+    final rows = await db.query(
+      'books',
+      columns: ['original_path', 'cover_path'],
+      where: 'id = ?',
+      whereArgs: [bookId],
+      limit: 1,
+    );
+    if (rows.isEmpty) return;
+    final originalPath = rows.first['original_path'] as String?;
+    final coverPath = rows.first['cover_path'] as String?;
+
+    await db.transaction((txn) async {
+      final mentionRows = await txn.rawQuery(
+        '''
+        SELECT DISTINCT entity_id FROM entity_mentions
+        WHERE book_id = ?
+           OR sentence_id IN (SELECT id FROM sentences WHERE book_id = ?)
+        ''',
+        [bookId, bookId],
+      );
+      final relationRows = await txn.rawQuery(
+        '''
+        SELECT DISTINCT relation_id FROM relation_sources
+        WHERE book_id = ?
+           OR sentence_id IN (SELECT id FROM sentences WHERE book_id = ?)
+        ''',
+        [bookId, bookId],
+      );
+      final eventRows = await txn.rawQuery(
+        '''
+        SELECT DISTINCT event_id FROM event_sources
+        WHERE book_id = ?
+           OR sentence_id IN (SELECT id FROM sentences WHERE book_id = ?)
+        ''',
+        [bookId, bookId],
+      );
+      final entityIds = [
+        for (final row in mentionRows) row['entity_id'] as String?,
+      ].whereType<String>().toSet();
+      final relationIds = [
+        for (final row in relationRows) row['relation_id'] as String?,
+      ].whereType<String>().toSet();
+      final eventIds = [for (final row in eventRows) row['event_id'] as String?]
+          .whereType<String>()
+          .toSet();
+
+      // Entities referenced by relations or events sourced from this book are
+      // candidates too, even if the extractor never stored a direct mention.
+      for (final id in relationIds) {
+        final relation = await txn.query(
+          'entity_relations',
+          columns: ['from_entity_id', 'to_entity_id'],
+          where: 'id = ?',
+          whereArgs: [id],
+          limit: 1,
+        );
+        if (relation.isEmpty) continue;
+        final row = relation.first;
+        final from = row['from_entity_id'] as String?;
+        final to = row['to_entity_id'] as String?;
+        if (from != null) entityIds.add(from);
+        if (to != null) entityIds.add(to);
+      }
+      for (final id in eventIds) {
+        final participants = await txn.query(
+          'event_participants',
+          columns: ['entity_id'],
+          where: 'event_id = ?',
+          whereArgs: [id],
+        );
+        for (final row in participants) {
+          final entityId = row['entity_id'] as String?;
+          if (entityId != null) entityIds.add(entityId);
+        }
+      }
+
+      await txn.delete(
+        'entity_mentions',
+        where: 'book_id = ? OR sentence_id IN (SELECT id FROM sentences WHERE book_id = ?)',
+        whereArgs: [bookId, bookId],
+      );
+      await txn.delete(
+        'relation_sources',
+        where: 'book_id = ? OR sentence_id IN (SELECT id FROM sentences WHERE book_id = ?)',
+        whereArgs: [bookId, bookId],
+      );
+      await txn.delete(
+        'event_sources',
+        where: 'book_id = ? OR sentence_id IN (SELECT id FROM sentences WHERE book_id = ?)',
+        whereArgs: [bookId, bookId],
+      );
+      await txn.delete(
+        'tasks',
+        where: 'book_id = ? OR chapter_id IN (SELECT id FROM chapters WHERE book_id = ?)',
+        whereArgs: [bookId, bookId],
+      );
+      await txn.delete(
+        'assistant_sessions',
+        where: 'book_id = ? OR chapter_id IN (SELECT id FROM chapters WHERE book_id = ?)',
+        whereArgs: [bookId, bookId],
+      );
+      if (database.ftsAvailable) {
+        await txn.delete(
+          'search_fts',
+          where: 'book_id = ?',
+          whereArgs: [bookId],
+        );
+      }
+
+      await txn.delete('books', where: 'id = ?', whereArgs: [bookId]);
+
+      for (final id in relationIds) {
+        await txn.delete(
+          'entity_relations',
+          where: 'id = ? AND NOT EXISTS (SELECT 1 FROM relation_sources WHERE relation_id = ?)',
+          whereArgs: [id, id],
+        );
+      }
+      for (final id in eventIds) {
+        await txn.delete(
+          'historical_events',
+          where: 'id = ? AND NOT EXISTS (SELECT 1 FROM event_sources WHERE event_id = ?)',
+          whereArgs: [id, id],
+        );
+      }
+      for (final id in entityIds) {
+        await txn.delete(
+          'entities',
+          where:
+              'id = ? '
+              'AND NOT EXISTS (SELECT 1 FROM entity_mentions WHERE entity_id = ?) '
+              'AND NOT EXISTS (SELECT 1 FROM entity_relations WHERE from_entity_id = ? OR to_entity_id = ?)',
+          whereArgs: [id, id, id, id],
+        );
+      }
+      await txn.rawUpdate('''
+        UPDATE event_participants
+        SET entity_id = NULL
+        WHERE entity_id IS NOT NULL
+          AND NOT EXISTS (
+            SELECT 1 FROM entities e WHERE e.id = event_participants.entity_id
+          )
+        ''');
+    });
+
+    final paths = database.paths;
+    final booksRoot = p.normalize(p.absolute(paths.booksDir.path));
+    var bookDir = Directory(p.join(paths.booksDir.path, bookId));
+    if (originalPath != null && originalPath.isNotEmpty) {
+      final candidate = p.normalize(p.absolute(p.dirname(originalPath)));
+      if (p.isWithin(booksRoot, candidate)) {
+        bookDir = Directory(candidate);
+      }
+    }
+    try {
+      if (await bookDir.exists()) {
+        await bookDir.delete(recursive: true);
+      }
+    } catch (_) {
+      // The database row is already gone; leave an orphaned file behind.
+    }
+    final cover = File(
+      (coverPath != null && coverPath.isNotEmpty)
+          ? coverPath
+          : p.join(paths.coversDir.path, '$bookId.img'),
+    );
+    try {
+      if (await cover.exists()) await cover.delete();
+    } catch (_) {
+      // The database row is already gone; leave an orphaned cover behind.
+    }
   }
 
   Future<void> setLastRead(String bookId) async {

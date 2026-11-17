@@ -9,6 +9,7 @@ import '../../core/local/local_errors.dart';
 import '../../data/models.dart';
 import '../../providers.dart';
 import '../book_detail/book_detail_screen.dart';
+import 'book_dialogs.dart';
 
 class BookshelfScreen extends ConsumerStatefulWidget {
   const BookshelfScreen({super.key});
@@ -327,6 +328,40 @@ class _BookshelfScreenState extends ConsumerState<BookshelfScreen> {
     return result;
   }
 
+  Future<void> _editBook(Book book) async {
+    final values = await showBookEditDialog(context, book);
+    if (values == null || !mounted) return;
+    try {
+      await ref.read(localStoreProvider).updateBook(book.id, values);
+      await ref.read(bookshelfProvider.notifier).refresh();
+      if (!mounted) return;
+      ScaffoldMessenger.of(context)
+          .showSnackBar(SnackBar(content: Text('已保存《${values['title']}》')));
+    } catch (error) {
+      _showError('保存失败：$error');
+    }
+  }
+
+  Future<void> _deleteBook(Book book) async {
+    final confirmed = await confirmBookDeletion(context, book);
+    if (!confirmed || !mounted) return;
+    try {
+      await runWithProgressDialog(
+        context,
+        '正在删除《${book.title}》及其关联数据…\n'
+        '书籍较大时可能需要较长时间，请勿关闭应用。',
+        () => ref.read(localStoreProvider).deleteBookPermanently(book.id),
+      );
+      if (!mounted) return;
+      await ref.read(bookshelfProvider.notifier).refresh();
+      if (!mounted) return;
+      ScaffoldMessenger.of(context)
+          .showSnackBar(SnackBar(content: Text('已永久删除《${book.title}》')));
+    } catch (error) {
+      _showError('删除失败：$error');
+    }
+  }
+
   Future<void> _openBook(Book book) async {
     await Navigator.of(context).push(
       MaterialPageRoute(builder: (_) => BookDetailScreen(bookId: book.id)),
@@ -476,6 +511,8 @@ class _BookshelfScreenState extends ConsumerState<BookshelfScreen> {
                         (context, index) => _BookCard(
                           book: snapshot.books[index],
                           onTap: () => _openBook(snapshot.books[index]),
+                          onEdit: () => _editBook(snapshot.books[index]),
+                          onDelete: () => _deleteBook(snapshot.books[index]),
                         ),
                         childCount: snapshot.books.length,
                       ),
@@ -514,9 +551,16 @@ class _BookshelfScreenState extends ConsumerState<BookshelfScreen> {
 }
 
 class _BookCard extends ConsumerWidget {
-  const _BookCard({required this.book, required this.onTap});
+  const _BookCard({
+    required this.book,
+    required this.onTap,
+    required this.onEdit,
+    required this.onDelete,
+  });
   final Book book;
   final VoidCallback onTap;
+  final VoidCallback onEdit;
+  final VoidCallback onDelete;
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
@@ -576,6 +620,50 @@ class _BookCard extends ConsumerWidget {
                           color: Colors.white,
                           letterSpacing: 0.8,
                         ),
+                      ),
+                    ),
+                  ),
+                  Positioned(
+                    right: 8,
+                    top: 8,
+                    child: Material(
+                      color: Colors.black.withValues(alpha: 0.32),
+                      shape: const CircleBorder(),
+                      clipBehavior: Clip.antiAlias,
+                      child: PopupMenuButton<String>(
+                        tooltip: '书籍操作',
+                        icon: const Icon(
+                          Icons.more_horiz_rounded,
+                          color: Colors.white,
+                          size: 20,
+                        ),
+                        padding: EdgeInsets.zero,
+                        iconSize: 20,
+                        onSelected: (value) {
+                          if (value == 'edit') {
+                            onEdit();
+                          } else if (value == 'delete') {
+                            onDelete();
+                          }
+                        },
+                        itemBuilder: (context) => const [
+                          PopupMenuItem(
+                            value: 'edit',
+                            child: ListTile(
+                              contentPadding: EdgeInsets.zero,
+                              leading: Icon(Icons.edit_outlined),
+                              title: Text('编辑书籍信息'),
+                            ),
+                          ),
+                          PopupMenuItem(
+                            value: 'delete',
+                            child: ListTile(
+                              contentPadding: EdgeInsets.zero,
+                              leading: Icon(Icons.delete_outline_rounded),
+                              title: Text('永久删除'),
+                            ),
+                          ),
+                        ],
                       ),
                     ),
                   ),

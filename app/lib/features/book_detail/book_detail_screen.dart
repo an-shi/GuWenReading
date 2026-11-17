@@ -1,4 +1,3 @@
-import 'dart:convert';
 import 'dart:io';
 
 import 'package:flutter/material.dart';
@@ -6,6 +5,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../data/models.dart';
 import '../../providers.dart';
+import '../bookshelf/book_dialogs.dart';
 import '../notes/notes_screen.dart';
 import '../reader/reader_screen.dart';
 
@@ -72,129 +72,34 @@ class _BookDetailScreenState extends ConsumerState<BookDetailScreen> {
   }
 
   Future<void> _editBook(Book book) async {
-    final title = TextEditingController(text: book.title);
-    final author = TextEditingController(text: book.author ?? '');
-    final dynasty = TextEditingController(text: book.dynasty ?? '');
-    final category = TextEditingController(text: book.category ?? '');
-    final tags = TextEditingController(text: book.tags.join('、'));
-    final description = TextEditingController(text: book.description ?? '');
-    final saved = await showDialog<bool>(
-      context: context,
-      builder: (context) => AlertDialog(
-        title: const Text('编辑书籍信息'),
-        content: SizedBox(
-          width: 620,
-          child: SingleChildScrollView(
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                TextField(
-                  controller: title,
-                  decoration: const InputDecoration(labelText: '书名'),
-                ),
-                const SizedBox(height: 10),
-                Row(
-                  children: [
-                    Expanded(
-                      child: TextField(
-                        controller: author,
-                        decoration: const InputDecoration(labelText: '作者'),
-                      ),
-                    ),
-                    const SizedBox(width: 10),
-                    Expanded(
-                      child: TextField(
-                        controller: dynasty,
-                        decoration: const InputDecoration(labelText: '朝代'),
-                      ),
-                    ),
-                  ],
-                ),
-                const SizedBox(height: 10),
-                Row(
-                  children: [
-                    Expanded(
-                      child: TextField(
-                        controller: category,
-                        decoration: const InputDecoration(labelText: '分类'),
-                      ),
-                    ),
-                    const SizedBox(width: 10),
-                    Expanded(
-                      child: TextField(
-                        controller: tags,
-                        decoration: const InputDecoration(
-                          labelText: '标签（顿号分隔）',
-                        ),
-                      ),
-                    ),
-                  ],
-                ),
-                const SizedBox(height: 10),
-                TextField(
-                  controller: description,
-                  maxLines: 3,
-                  decoration: const InputDecoration(labelText: '简介'),
-                ),
-              ],
-            ),
-          ),
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(context, false),
-            child: const Text('取消'),
-          ),
-          FilledButton(
-            onPressed: () => Navigator.pop(context, true),
-            child: const Text('保存'),
-          ),
-        ],
-      ),
-    );
-    if (saved != true || title.text.trim().isEmpty) return;
-    await ref.read(localStoreProvider).updateBook(book.id, {
-      'title': title.text.trim(),
-      'author': author.text.trim().isEmpty ? null : author.text.trim(),
-      'dynasty': dynasty.text.trim().isEmpty ? null : dynasty.text.trim(),
-      'category': category.text.trim().isEmpty ? null : category.text.trim(),
-      'description': description.text.trim().isEmpty
-          ? null
-          : description.text.trim(),
-      'tags': jsonEncode(
-        tags.text
-            .split(RegExp(r'[、,，]'))
-            .map((tag) => tag.trim())
-            .where((tag) => tag.isNotEmpty)
-            .toList(),
-      ),
-    });
+    final values = await showBookEditDialog(context, book);
+    if (values == null || !mounted) return;
+    await ref.read(localStoreProvider).updateBook(book.id, values);
     ref.invalidate(bookProvider(widget.bookId));
     ref.invalidate(bookshelfProvider);
   }
 
   Future<void> _deleteBook(Book book) async {
-    final confirmed = await showDialog<bool>(
-      context: context,
-      builder: (context) => AlertDialog(
-        title: const Text('移出书架？'),
-        content: Text('将把《${book.title}》从书架移除。原始文件与数据库记录会保留，可在数据备份中找回。'),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(context, false),
-            child: const Text('取消'),
-          ),
-          FilledButton(
-            onPressed: () => Navigator.pop(context, true),
-            child: const Text('移出'),
-          ),
-        ],
-      ),
-    );
-    if (confirmed != true) return;
-    await ref.read(localStoreProvider).softDeleteBook(book.id);
-    ref.invalidate(bookshelfProvider);
-    if (mounted) Navigator.of(context).pop();
+    final confirmed = await confirmBookDeletion(context, book);
+    if (confirmed != true || !mounted) return;
+    try {
+      await runWithProgressDialog(
+        context,
+        '正在删除《${book.title}》及其关联数据…\n'
+        '书籍较大时可能需要较长时间，请勿关闭应用。',
+        () => ref.read(localStoreProvider).deleteBookPermanently(book.id),
+      );
+      ref.invalidate(bookshelfProvider);
+      if (mounted) Navigator.of(context).pop();
+    } catch (error) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('删除失败：$error'),
+          backgroundColor: Theme.of(context).colorScheme.error,
+        ),
+      );
+    }
   }
 
   @override
@@ -232,7 +137,7 @@ class _BookDetailScreenState extends ConsumerState<BookDetailScreen> {
             },
             itemBuilder: (context) => const [
               PopupMenuItem(value: 'edit', child: Text('编辑书籍信息')),
-              PopupMenuItem(value: 'delete', child: Text('移出书架')),
+              PopupMenuItem(value: 'delete', child: Text('永久删除')),
             ],
           ),
         ],

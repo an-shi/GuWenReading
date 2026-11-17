@@ -164,6 +164,7 @@ class LocalApi {
     String? category,
     String? tags,
     String? description,
+    void Function(double progress, String message)? onProgress,
   }) {
     return importService.importBytes(
       filename: filename,
@@ -174,6 +175,7 @@ class LocalApi {
       category: category,
       tags: tags,
       description: description,
+      onProgress: onProgress,
     );
   }
 

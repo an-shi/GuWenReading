@@ -52,6 +52,7 @@ class BookshelfController extends AsyncNotifier<BookshelfSnapshot> {
     String? dynasty,
     String? category,
     String? tags,
+    void Function(double progress, String message)? onProgress,
   }) async {
     final book = await ref
         .read(libraryRepositoryProvider)
@@ -63,6 +64,7 @@ class BookshelfController extends AsyncNotifier<BookshelfSnapshot> {
           dynasty: dynasty,
           category: category,
           tags: tags,
+          onProgress: onProgress,
         );
     await refresh();
     return book;

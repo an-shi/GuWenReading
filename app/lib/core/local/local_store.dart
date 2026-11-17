@@ -1140,19 +1140,51 @@ class LocalStore {
     }
   }
 
-  Future<void> importSentencesSearchIndex(String bookId) async {
+  Future<void> importSentencesSearchIndex(
+    String bookId, {
+    void Function(int done, int total)? onProgress,
+  }) async {
     final rows = await db.rawQuery(
       'SELECT s.id, s.chapter_id, s.original_text FROM sentences s WHERE s.book_id = ?',
       [bookId],
     );
-    for (final row in rows) {
-      await indexSentence(
-        sentenceId: row['id'] as String,
-        bookId: bookId,
-        chapterId: row['chapter_id'] as String,
-        text: row['original_text'] as String? ?? '',
-        docType: 'original',
-      );
+    final total = rows.length;
+    if (!database.ftsAvailable || total == 0) {
+      onProgress?.call(total, total);
+      return;
+    }
+    final step = (total / 20).ceil();
+    var batch = db.batch();
+    var pending = 0;
+    for (var index = 0; index < total; index++) {
+      final row = rows[index];
+      batch.insert('search_fts', {
+        'text': row['original_text'] as String? ?? '',
+        'book_id': bookId,
+        'chapter_id': row['chapter_id'] as String,
+        'sentence_id': row['id'] as String,
+        'doc_type': 'original',
+      });
+      pending += 1;
+      if (pending >= 500) {
+        try {
+          await batch.commit(noResult: true);
+        } catch (_) {
+          // Search remains available through the LIKE fallback.
+        }
+        batch = db.batch();
+        pending = 0;
+      }
+      if (index == 0 || index == total - 1 || (index + 1) % step == 0) {
+        onProgress?.call(index + 1, total);
+      }
+    }
+    if (pending > 0) {
+      try {
+        await batch.commit(noResult: true);
+      } catch (_) {
+        // Search remains available through the LIKE fallback.
+      }
     }
   }
 

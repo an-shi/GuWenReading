@@ -30,6 +30,7 @@ class ImportService {
     void Function(double progress, String message)? onProgress,
   }) async {
     if (bytes.isEmpty) throw DocumentParseException('文件为空');
+    onProgress?.call(0.02, '正在校验文件');
     final hash = sha256.convert(bytes).toString();
     final existing = await store.db.query(
       'books',
@@ -39,23 +40,38 @@ class ImportService {
     );
     if (existing.isNotEmpty) {
       final book = await store.getBook(existing.first['id'] as String);
-      if (book != null) return book;
+      if (book != null) {
+        onProgress?.call(1, '书籍已存在，直接打开');
+        return book;
+      }
     }
 
-    onProgress?.call(0.08, '正在识别文件格式');
-    final parsed = await parseDocument(filename: filename, bytes: bytes);
-    onProgress?.call(0.35, '正在构建章节与句子');
+    onProgress?.call(0.05, '正在准备解析文件');
+    final parsed = await parseDocument(
+      filename: filename,
+      bytes: bytes,
+      onProgress: (progress, message) =>
+          onProgress?.call(0.06 + progress * 0.28, message),
+    );
+    onProgress?.call(0.34, '已解析 ${parsed.chapters.length} 个章节，正在保存原始文件');
 
     final bookId = newLocalId('book');
     final bookDir = Directory(p.join(paths.booksDir.path, bookId));
-    if (!await bookDir.exists()) await bookDir.create(recursive: true);
-    final extension = p.extension(filename).toLowerCase();
-    final originalPath = p.join(bookDir.path, 'original$extension');
-    await File(originalPath).writeAsBytes(bytes, flush: true);
     String? coverPath;
-    if (parsed.cover != null && parsed.cover!.isNotEmpty) {
-      coverPath = p.join(paths.coversDir.path, '$bookId.img');
-      await File(coverPath).writeAsBytes(parsed.cover!, flush: true);
+    final originalPath = p.join(
+      bookDir.path,
+      'original${p.extension(filename).toLowerCase()}',
+    );
+    try {
+      if (!await bookDir.exists()) await bookDir.create(recursive: true);
+      await File(originalPath).writeAsBytes(bytes, flush: true);
+      if (parsed.cover != null && parsed.cover!.isNotEmpty) {
+        coverPath = p.join(paths.coversDir.path, '$bookId.img');
+        await File(coverPath).writeAsBytes(parsed.cover!, flush: true);
+      }
+    } catch (error) {
+      if (await bookDir.exists()) await bookDir.delete(recursive: true);
+      throw DocumentParseException('保存原始文件失败：$error');
     }
 
     final now = nowIso();
@@ -77,6 +93,14 @@ class ImportService {
     var chapterCount = 0;
     var paragraphCount = 0;
     var sentenceCount = 0;
+    final totalChapters = parsed.chapters.length;
+    final totalParagraphs = parsed.chapters.fold<int>(
+      0,
+      (sum, chapter) => sum + chapter.paragraphs.length,
+    );
+    var processedParagraphs = 0;
+    var lastReported = 0.36;
+    onProgress?.call(0.36, '正在写入章节与句子');
     try {
       await store.db.transaction((txn) async {
         await txn.insert('books', {
@@ -113,9 +137,11 @@ class ImportService {
           });
           var paragraphOrdinal = 0;
           var chapterSentenceCount = 0;
+          var pendingInBatch = 0;
+          var batch = txn.batch();
           for (final paragraphText in chapter.paragraphs) {
             final paragraphId = newLocalId('p');
-            await txn.insert('paragraphs', {
+            batch.insert('paragraphs', {
               'id': paragraphId,
               'book_id': bookId,
               'chapter_id': chapterId,
@@ -126,7 +152,7 @@ class ImportService {
             });
             final spans = splitSentences(paragraphText);
             for (final span in spans) {
-              await txn.insert('sentences', {
+              batch.insert('sentences', {
                 'id': newLocalId('s'),
                 'book_id': bookId,
                 'chapter_id': chapterId,
@@ -142,6 +168,28 @@ class ImportService {
               chapterSentenceCount += 1;
             }
             paragraphOrdinal += 1;
+            processedParagraphs += 1;
+            pendingInBatch += 1;
+            if (pendingInBatch >= 200) {
+              await batch.commit(noResult: true);
+              batch = txn.batch();
+              pendingInBatch = 0;
+            }
+            final writeProgress = totalParagraphs == 0
+                ? 0.80
+                : 0.36 + 0.44 * (processedParagraphs / totalParagraphs);
+            if (writeProgress - lastReported >= 0.01 ||
+                processedParagraphs == totalParagraphs) {
+              lastReported = writeProgress;
+              onProgress?.call(
+                writeProgress,
+                '正在写入第 ${chapterOrdinal + 1}/$totalChapters 章 · '
+                '$processedParagraphs/$totalParagraphs 段',
+              );
+            }
+          }
+          if (pendingInBatch > 0) {
+            await batch.commit(noResult: true);
           }
           await txn.update(
             'chapters',
@@ -168,10 +216,18 @@ class ImportService {
       });
     } catch (error) {
       if (await bookDir.exists()) await bookDir.delete(recursive: true);
-      rethrow;
+      if (error is DocumentParseException) rethrow;
+      throw DocumentParseException('写入书籍数据失败：$error');
     }
-    onProgress?.call(0.75, '正在建立全文检索索引');
-    await store.importSentencesSearchIndex(bookId);
+    onProgress?.call(0.84, '正在建立全文检索索引');
+    await store.importSentencesSearchIndex(
+      bookId,
+      onProgress: (done, total) {
+        final fraction = total == 0 ? 1.0 : done / total;
+        onProgress?.call(0.84 + 0.14 * fraction, '正在建立全文检索索引 $done/$total');
+      },
+    );
+    onProgress?.call(0.99, '正在完成导入');
     onProgress?.call(1, '导入完成');
     final book = await store.getBook(bookId);
     if (book == null) throw DocumentParseException('书籍写入失败');

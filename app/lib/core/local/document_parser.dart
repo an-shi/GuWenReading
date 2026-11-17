@@ -41,36 +41,47 @@ class ParsedMetadata {
   final String? description;
 }
 
+typedef ParseProgressCallback = void Function(double progress, String message);
+
 Future<ParsedDocument> parseDocument({
   required String filename,
   required Uint8List bytes,
+  ParseProgressCallback? onProgress,
 }) async {
   final extension = p.extension(filename).toLowerCase();
+  onProgress?.call(0.01, '正在检查文件类型');
   switch (extension) {
     case '.txt':
-      return _parseTxt(filename, bytes);
+      return _parseTxt(filename, bytes, onProgress);
     case '.epub':
-      return _parseEpub(filename, bytes);
+      return _parseEpub(filename, bytes, onProgress);
     case '.docx':
-      return _parseDocx(filename, bytes);
+      return _parseDocx(filename, bytes, onProgress);
     case '.pdf':
-      return _parsePdf(filename, bytes);
+      return _parsePdf(filename, bytes, onProgress);
     default:
       throw DocumentParseException('不支持的文件格式：$extension');
   }
 }
 
-Future<ParsedDocument> _parseTxt(String filename, Uint8List bytes) async {
+Future<ParsedDocument> _parseTxt(
+  String filename,
+  Uint8List bytes,
+  ParseProgressCallback? onProgress,
+) async {
   if (bytes.isEmpty) throw DocumentParseException('TXT 文件为空');
+  onProgress?.call(0.05, '正在识别文本编码');
   final decoded = await _decodeText(bytes);
   final text = decoded.text
       .replaceAll('\r\n', '\n')
       .replaceAll('\r', '\n')
       .replaceAll('\x00', '');
+  onProgress?.call(0.18, '正在识别章节结构');
   final lines = text.split('\n');
   final meta = guessMetadata(filename, lines.take(200).join('\n'));
   final chapters = buildChapters(lines, defaultTitle: meta.title);
   if (chapters.isEmpty) throw DocumentParseException('TXT 中没有可读文本');
+  onProgress?.call(0.31, '已识别 ${chapters.length} 个章节');
   return ParsedDocument(
     format: 'txt',
     chapters: chapters,
@@ -146,29 +157,46 @@ String _decodeUtf16(Uint8List bytes, {required bool littleEndian}) {
   return String.fromCharCodes(units);
 }
 
-Future<ParsedDocument> _parseEpub(String filename, Uint8List bytes) async {
+Future<ParsedDocument> _parseEpub(
+  String filename,
+  Uint8List bytes,
+  ParseProgressCallback? onProgress,
+) async {
+  onProgress?.call(0.03, '正在解压 EPUB');
   final Archive archive;
   try {
     archive = ZipDecoder().decodeBytes(bytes, verify: false);
   } catch (error) {
     throw DocumentParseException('EPUB 压缩包无法读取：$error');
   }
+  onProgress?.call(0.08, '正在读取 EPUB 目录');
   final files = {for (final file in archive.files) file.name: file};
   final containerFile = files['META-INF/container.xml'];
   if (containerFile == null) {
     throw DocumentParseException('EPUB 缺少 META-INF/container.xml');
   }
-  final containerXml = XmlDocument.parse(
-    utf8.decode(containerFile.content as List<int>),
-  );
+  final XmlDocument containerXml;
+  try {
+    containerXml = XmlDocument.parse(
+      utf8.decode(containerFile.content as List<int>),
+    );
+  } catch (error) {
+    throw DocumentParseException('EPUB 的 container.xml 无法解析：$error');
+  }
   final rootfile = _firstByLocalName(containerXml, 'rootfile');
   final opfPath = rootfile?.getAttribute('full-path');
   if (opfPath == null || !files.containsKey(opfPath)) {
     throw DocumentParseException('EPUB 找不到 OPF 清单');
   }
-  final opfXml = XmlDocument.parse(
-    utf8.decode(files[opfPath]!.content as List<int>),
-  );
+  final XmlDocument opfXml;
+  try {
+    opfXml = XmlDocument.parse(
+      utf8.decode(files[opfPath]!.content as List<int>),
+    );
+  } catch (error) {
+    throw DocumentParseException('EPUB 的 OPF 清单无法解析：$error');
+  }
+  onProgress?.call(0.11, '正在读取书籍信息与章节清单');
   final opfDir = p.dirname(opfPath);
   final title = _firstTextByLocalName(opfXml, 'title');
   final creator = _firstTextByLocalName(opfXml, 'creator');
@@ -195,7 +223,16 @@ Future<ParsedDocument> _parseEpub(String filename, Uint8List bytes) async {
     }
   }
 
-  for (final id in spineIds) {
+  final spineStep = (spineIds.length / 40).ceil().clamp(1, 1000);
+  for (var index = 0; index < spineIds.length; index++) {
+    final id = spineIds[index];
+    if (index % spineStep == 0 || index == spineIds.length - 1) {
+      final chapterProgress = 0.12 + 0.17 * ((index + 1) / spineIds.length);
+      onProgress?.call(
+        chapterProgress,
+        '正在解析章节文件 ${index + 1}/${spineIds.length}',
+      );
+    }
     final item = manifest[id];
     if (item == null) continue;
     final mediaType = item.getAttribute('media-type') ?? '';
@@ -230,6 +267,7 @@ Future<ParsedDocument> _parseEpub(String filename, Uint8List bytes) async {
   }
 
   if (chapters.isEmpty) throw DocumentParseException('EPUB 中没有可读文本');
+  onProgress?.call(0.31, '已解析 ${chapters.length} 个章节');
   final guessed = guessMetadata(filename, title ?? '');
   return ParsedDocument(
     format: 'epub',
@@ -277,13 +315,19 @@ Iterable<XmlElement> _elementsByLocalName(XmlNode node, String name) sync* {
   }
 }
 
-Future<ParsedDocument> _parseDocx(String filename, Uint8List bytes) async {
+Future<ParsedDocument> _parseDocx(
+  String filename,
+  Uint8List bytes,
+  ParseProgressCallback? onProgress,
+) async {
+  onProgress?.call(0.04, '正在解压 DOCX');
   final Archive archive;
   try {
     archive = ZipDecoder().decodeBytes(bytes, verify: false);
   } catch (error) {
     throw DocumentParseException('DOCX 压缩包无法读取：$error');
   }
+  onProgress?.call(0.12, '正在读取 DOCX 正文');
   final documentFile = archive.files.firstWhere(
     (file) => file.name == 'word/document.xml',
     orElse: () => throw DocumentParseException('DOCX 缺少 word/document.xml'),
@@ -310,6 +354,7 @@ Future<ParsedDocument> _parseDocx(String filename, Uint8List bytes) async {
     }
   }
   if (lines.isEmpty) throw DocumentParseException('DOCX 中没有可读文本');
+  onProgress?.call(0.24, '正在识别章节结构');
   String? title;
   String? creator;
   final core = archive.files
@@ -323,6 +368,7 @@ Future<ParsedDocument> _parseDocx(String filename, Uint8List bytes) async {
   final guessed = guessMetadata(filename, lines.take(100).join('\n'));
   final chapters = buildChapters(lines, defaultTitle: title ?? guessed.title);
   if (chapters.isEmpty) throw DocumentParseException('DOCX 中没有可读文本');
+  onProgress?.call(0.31, '已识别 ${chapters.length} 个章节');
   return ParsedDocument(
     format: 'docx',
     chapters: chapters,
@@ -336,15 +382,30 @@ Future<ParsedDocument> _parseDocx(String filename, Uint8List bytes) async {
   );
 }
 
-Future<ParsedDocument> _parsePdf(String filename, Uint8List bytes) async {
+Future<ParsedDocument> _parsePdf(
+  String filename,
+  Uint8List bytes,
+  ParseProgressCallback? onProgress,
+) async {
+  onProgress?.call(0.03, '正在打开 PDF');
   PdfDocument? document;
   try {
     document = await PdfDocument.openData(bytes, sourceName: filename);
+    final pages = document.pages;
     final textPages = <String>[];
-    for (final page in document.pages) {
-      final raw = await page.loadText();
+    final pageStep = (pages.length / 40).ceil().clamp(1, 1000);
+    for (var index = 0; index < pages.length; index++) {
+      if (index % pageStep == 0 || index == pages.length - 1) {
+        final pageProgress = 0.08 + 0.18 * ((index + 1) / pages.length);
+        onProgress?.call(
+          pageProgress,
+          '正在提取第 ${index + 1}/${pages.length} 页文字',
+        );
+      }
+      final raw = await pages[index].loadText();
       textPages.add(raw?.fullText ?? '');
     }
+    onProgress?.call(0.28, '正在识别章节结构');
     final text = textPages.join('\n\n').trim();
     if (text.length < 20) {
       throw DocumentParseException('PDF 中没有可提取的文字，扫描版 PDF 需要 OCR，本版本不提供。');
@@ -356,6 +417,7 @@ Future<ParsedDocument> _parsePdf(String filename, Uint8List bytes) async {
     final meta = guessMetadata(filename, lines.take(200).join('\n'));
     final chapters = buildChapters(lines, defaultTitle: meta.title);
     if (chapters.isEmpty) throw DocumentParseException('PDF 中没有可读文本');
+    onProgress?.call(0.31, '已识别 ${chapters.length} 个章节');
     return ParsedDocument(
       format: 'pdf',
       chapters: chapters,

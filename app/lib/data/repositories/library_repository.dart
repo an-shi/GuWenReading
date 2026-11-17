@@ -67,6 +67,7 @@ class LibraryRepository {
     String? dynasty,
     String? category,
     String? tags,
+    void Function(double progress, String message)? onProgress,
   }) {
     return api.importBook(
       filename: filename,
@@ -76,6 +77,7 @@ class LibraryRepository {
       dynasty: dynasty,
       category: category,
       tags: tags,
+      onProgress: onProgress,
     );
   }
 

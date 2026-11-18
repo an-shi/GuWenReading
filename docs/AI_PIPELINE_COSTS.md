@@ -58,12 +58,10 @@
 
 尚未实现（见第 7 节）：
 
-- Provider 原生 Prompt Caching 和 Batch API 的显式支持。
-- 精确 Tokenizer；当前对没有 usage 的响应使用估算。
-- 单章节、单本书级别的独立预算（目前是单次任务预算）。
-- 自动在应用重启后无人工点击恢复任务。
-- AI 参与的多候选实体消歧。
+- Provider Batch API。
+- 精确 Tokenizer 词表；当前在无 usage 时使用模型系列估算。
 - 按实体/关系/事件分别路由不同模型；当前联合抽取使用一个“知识抽取模型”。
+- Gemini cached contents 等 Provider 专有 Prompt Caching；Anthropic 已支持显式缓存标记。
 
 ## 1. 翻译调用链
 

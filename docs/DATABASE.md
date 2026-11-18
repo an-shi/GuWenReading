@@ -78,6 +78,12 @@
 
 `historical_events.fingerprint` 用于事件去重，唯一索引只为非空指纹建立。
 
+知识可信度与来源：
+
+- `entities.knowledge_type`、`entity_relations.knowledge_type`、`historical_events.knowledge_type`：`explicit / inferred / cross_source_supported / disputed / human_verified`。
+- `entity_mentions / relation_sources / event_sources` 新增 `chunk_index`、`task_id`、`provider_id`、`model_id`、`prompt_version`、`schema_version`、`extracted_at`，用于从知识记录回溯任务、模型、版本和原文。
+- `knowledge_review_events` 保存人工审核前后 JSON，支持撤销。
+
 ### 全文检索
 
 ```sql

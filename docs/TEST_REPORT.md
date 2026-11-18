@@ -112,6 +112,8 @@ flutter build windows --debug
 - **Windows 桌面运行**：已构建并启动，字体与数据目录迁移流程待人工逐页确认。
 - **Android/iOS UI 冒烟**：模拟器未连接，iOS 需要 macOS。
 - **真实 AI 服务**：没有第三方 API Key；AI 流水线使用本地 Mock OpenAI 兼容服务验证，真实 Provider 的模型质量、限流和账单仍需配置密钥后验证。
+- **Provider Batch API**：尚未实现，当前所有任务仍走实时接口；未用并发请求冒充 Batch。
+- **精确 Tokenizer**：未内置各厂商 BPE 词表，发送前预算和无 usage 计量使用模型系列估算并标记来源。
 - **PDF 文字提取运行**：代码已接入 pdfrx/PDFium，APK 中包含原生库，但未在设备上实测文本型 PDF。
 - **扫描版 PDF OCR**：明确未实现。
 - **Tauri/Rust**：已移除，不再是本项目的一部分。

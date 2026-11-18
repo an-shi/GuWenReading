@@ -811,6 +811,10 @@ class _TaskCard extends StatelessWidget {
       'events_matched': '合并事件',
       'cached_chunks': '缓存块',
       'chunks': '文本块',
+      'quality_warnings': '质量警告',
+      'quality_reviews': '待审核块',
+      'disambiguated': '实体消歧',
+      'pending_review': '待审实体',
     };
     return task.result.entries
         .where((entry) => labels.containsKey(entry.key))

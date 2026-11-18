@@ -15,6 +15,7 @@ class _LocalLexiconScreenState extends ConsumerState<LocalLexiconScreen> {
   List<Map<String, Object?>> _entries = const [];
   bool _loading = true;
   String _query = '';
+  String _kind = '全部';
 
   @override
   void initState() {
@@ -33,14 +34,137 @@ class _LocalLexiconScreenState extends ConsumerState<LocalLexiconScreen> {
 
   List<Map<String, Object?>> get _filtered {
     final query = _query.trim();
-    if (query.isEmpty) return _entries;
-    return _entries
-        .where(
-          (entry) =>
-              '${entry['word']}'.contains(query) ||
-              '${entry['meanings']}'.contains(query),
-        )
-        .toList();
+    return _entries.where((entry) {
+      if (_kind != '全部' && entry['kind'] != _kind) return false;
+      if (query.isEmpty) return true;
+      return '${entry['word']}'.contains(query) ||
+          '${entry['meanings']}'.contains(query);
+    }).toList();
+  }
+
+  Map<String, int> get _kindCounts {
+    final result = <String, int>{};
+    for (final entry in _entries) {
+      final kind = '${entry['kind'] ?? '其他'}';
+      result[kind] = (result[kind] ?? 0) + 1;
+    }
+    return result;
+  }
+
+  static const _kinds = ['实词', '虚词', '专名', '代词', '其他'];
+
+  List<Widget> _groupedTiles(ThemeData theme) {
+    final widgets = <Widget>[];
+    final filtered = _filtered;
+    final groups = <String, List<Map<String, Object?>>>{};
+    for (final entry in filtered) {
+      groups.putIfAbsent('${entry['kind'] ?? '其他'}', () => []).add(entry);
+    }
+    final orderedKinds = [
+      ..._kinds.where(groups.containsKey),
+      ...groups.keys.where((kind) => !_kinds.contains(kind)),
+    ];
+    for (final kind in orderedKinds) {
+      widgets.add(
+        Padding(
+          padding: const EdgeInsets.fromLTRB(0, 12, 0, 4),
+          child: Row(
+            children: [
+              Text(
+                kind,
+                style: theme.textTheme.titleSmall?.copyWith(
+                  fontWeight: FontWeight.w600,
+                ),
+              ),
+              const SizedBox(width: 6),
+              Text(
+                '${groups[kind]!.length} 条',
+                style: theme.textTheme.labelSmall?.copyWith(
+                  color: theme.colorScheme.onSurface.withValues(alpha: 0.4),
+                ),
+              ),
+              const SizedBox(width: 8),
+              Expanded(
+                child: Divider(
+                  color: theme.colorScheme.onSurface.withValues(alpha: 0.06),
+                ),
+              ),
+            ],
+          ),
+        ),
+      );
+      for (final entry in groups[kind]!) {
+        widgets.add(_tile(entry, theme));
+      }
+    }
+    return widgets;
+  }
+
+  Widget _tile(Map<String, Object?> entry, ThemeData theme) {
+    final values = (entry['meanings'] as List? ?? const [])
+        .map((item) => '$item')
+        .join('、');
+    return ListTile(
+      contentPadding: EdgeInsets.zero,
+      leading: CircleAvatar(
+        radius: 18,
+        child: Text(
+          '${entry['word']}'.isEmpty ? '?' : '${entry['word']}'.substring(0, 1),
+          style: const TextStyle(fontSize: 13),
+        ),
+      ),
+      title: Row(
+        children: [
+          Text(
+            '${entry['word']}',
+            style: const TextStyle(fontWeight: FontWeight.w600),
+          ),
+          const SizedBox(width: 8),
+          Container(
+            padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 1),
+            decoration: BoxDecoration(
+              color:
+                  (entry['is_custom'] == 1
+                          ? theme.colorScheme.tertiary
+                          : theme.colorScheme.primary)
+                      .withValues(alpha: 0.07),
+              borderRadius: BorderRadius.circular(4),
+            ),
+            child: Text(
+              '${entry['kind']} · '
+              '${entry['is_custom'] == 1 ? '自定义' : '内置'}',
+              style: TextStyle(
+                fontSize: 9.5,
+                color: entry['is_custom'] == 1
+                    ? theme.colorScheme.tertiary
+                    : theme.colorScheme.primary,
+              ),
+            ),
+          ),
+        ],
+      ),
+      subtitle: Text(
+        '$values\n来源：${entry['source'] ?? '用户自定义'}',
+        maxLines: 3,
+        overflow: TextOverflow.ellipsis,
+      ),
+      isThreeLine: true,
+      trailing: Wrap(
+        spacing: 2,
+        children: [
+          IconButton(
+            tooltip: '编辑',
+            icon: const Icon(Icons.edit_outlined, size: 19),
+            onPressed: () => _edit(entry),
+          ),
+          IconButton(
+            tooltip: '删除',
+            icon: const Icon(Icons.delete_outline, size: 19),
+            onPressed: () => _delete(entry),
+          ),
+        ],
+      ),
+    );
   }
 
   Future<void> _edit([Map<String, Object?>? entry]) async {
@@ -210,14 +334,32 @@ class _LocalLexiconScreenState extends ConsumerState<LocalLexiconScreen> {
               isDense: true,
             ),
           ),
-          const SizedBox(height: 12),
+          const SizedBox(height: 10),
+          Wrap(
+            spacing: 6,
+            runSpacing: 6,
+            children: [
+              ChoiceChip(
+                label: Text('全部 ${_entries.length}'),
+                selected: _kind == '全部',
+                onSelected: (_) => setState(() => _kind = '全部'),
+              ),
+              for (final kind in _kinds)
+                ChoiceChip(
+                  label: Text('$kind ${_kindCounts[kind] ?? 0}'),
+                  selected: _kind == kind,
+                  onSelected: (_) => setState(() => _kind = kind),
+                ),
+            ],
+          ),
+          const SizedBox(height: 4),
           Expanded(
             child: _loading
                 ? const Center(child: CircularProgressIndicator())
                 : _filtered.isEmpty
                 ? Center(
                     child: Text(
-                      _entries.isEmpty ? '还没有自定义词条。' : '没有匹配的词条。',
+                      _entries.isEmpty ? '词库为空。' : '没有匹配的词条。',
                       style: theme.textTheme.bodyMedium?.copyWith(
                         color: theme.colorScheme.onSurface.withValues(
                           alpha: 0.45,
@@ -225,84 +367,7 @@ class _LocalLexiconScreenState extends ConsumerState<LocalLexiconScreen> {
                       ),
                     ),
                   )
-                : ListView.separated(
-                    itemCount: _filtered.length,
-                    separatorBuilder: (_, _) => const Divider(height: 1),
-                    itemBuilder: (context, index) {
-                      final entry = _filtered[index];
-                      final values = (entry['meanings'] as List? ?? const [])
-                          .map((item) => '$item')
-                          .join('、');
-                      return ListTile(
-                        contentPadding: EdgeInsets.zero,
-                        leading: CircleAvatar(
-                          radius: 18,
-                          child: Text(
-                            '${entry['word']}'.isEmpty
-                                ? '?'
-                                : '${entry['word']}'.substring(0, 1),
-                            style: const TextStyle(fontSize: 13),
-                          ),
-                        ),
-                        title: Row(
-                          children: [
-                            Text(
-                              '${entry['word']}',
-                              style: const TextStyle(
-                                fontWeight: FontWeight.w600,
-                              ),
-                            ),
-                            const SizedBox(width: 8),
-                            Container(
-                              padding: const EdgeInsets.symmetric(
-                                horizontal: 6,
-                                vertical: 1,
-                              ),
-                              decoration: BoxDecoration(
-                                color:
-                                    (entry['is_custom'] == 1
-                                            ? theme.colorScheme.tertiary
-                                            : theme.colorScheme.primary)
-                                        .withValues(alpha: 0.07),
-                                borderRadius: BorderRadius.circular(4),
-                              ),
-                              child: Text(
-                                '${entry['kind']} · '
-                                '${entry['is_custom'] == 1 ? '自定义' : '内置'}',
-                                style: TextStyle(
-                                  fontSize: 9.5,
-                                  color: entry['is_custom'] == 1
-                                      ? theme.colorScheme.tertiary
-                                      : theme.colorScheme.primary,
-                                ),
-                              ),
-                            ),
-                          ],
-                        ),
-                        subtitle: Text(
-                          '$values\n来源：${entry['source'] ?? '用户自定义'}',
-                          maxLines: 3,
-                          overflow: TextOverflow.ellipsis,
-                        ),
-                        isThreeLine: true,
-                        trailing: Wrap(
-                          spacing: 2,
-                          children: [
-                            IconButton(
-                              tooltip: '编辑',
-                              icon: const Icon(Icons.edit_outlined, size: 19),
-                              onPressed: () => _edit(entry),
-                            ),
-                            IconButton(
-                              tooltip: '删除',
-                              icon: const Icon(Icons.delete_outline, size: 19),
-                              onPressed: () => _delete(entry),
-                            ),
-                          ],
-                        ),
-                      );
-                    },
-                  ),
+                : ListView(children: _groupedTiles(theme)),
           ),
           Padding(
             padding: const EdgeInsets.only(top: 8),

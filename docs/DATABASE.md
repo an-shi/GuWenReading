@@ -73,6 +73,8 @@
 - `knowledge_review_events`：人工审核、修改、合并、拆分和撤销审计。
 - `prompt_schemas`：输出 JSON Schema 的版本与启用状态。
 - `ai_routing_decisions`：任务类型、原始/实际模型、路由模式、专项触发原因、故障切换与费用。
+- `tokenizer_vocabularies`：可安装词表的名称、版本、适用模型、来源、大小、校验值、状态和内容。
+- `gemini_cached_contents`：Gemini Cached Contents 资源名、TTL、到期时间和状态（服务层预留）。
 
 关系/事件编辑字段：
 

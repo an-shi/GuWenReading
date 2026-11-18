@@ -283,6 +283,10 @@ const List<String> schemaStatements = [
     cost REAL NOT NULL DEFAULT 0,
     requests INTEGER NOT NULL DEFAULT 0,
     estimated_usage INTEGER NOT NULL DEFAULT 0,
+    heartbeat_at TEXT,
+    lease_owner TEXT,
+    stage TEXT,
+    checkpoint TEXT,
     error TEXT,
     result TEXT NOT NULL DEFAULT '{}',
     created_at TEXT NOT NULL,
@@ -435,4 +439,30 @@ const List<String> schemaStatements = [
     updated_at TEXT NOT NULL
   )
   ''',
+  '''
+  CREATE TABLE IF NOT EXISTS ai_budget_limits (
+    scope TEXT NOT NULL,
+    scope_id TEXT NOT NULL DEFAULT '',
+    limit_amount REAL NOT NULL DEFAULT 0,
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY (scope, scope_id)
+  )
+  ''',
+  '''
+  CREATE TABLE IF NOT EXISTS ai_budget_reservations (
+    id TEXT PRIMARY KEY,
+    task_id TEXT NOT NULL,
+    book_id TEXT,
+    chapter_id TEXT,
+    estimated_cost REAL NOT NULL DEFAULT 0,
+    remaining_cost REAL NOT NULL DEFAULT 0,
+    released INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+  )
+  ''',
+  'CREATE INDEX IF NOT EXISTS idx_budget_task ON ai_budget_reservations(task_id, released)',
+  'CREATE INDEX IF NOT EXISTS idx_budget_book ON ai_budget_reservations(book_id, released)',
+  'CREATE INDEX IF NOT EXISTS idx_budget_chapter ON ai_budget_reservations(chapter_id, released)',
+  'CREATE INDEX IF NOT EXISTS idx_budget_created ON ai_budget_reservations(created_at, released)',
 ];

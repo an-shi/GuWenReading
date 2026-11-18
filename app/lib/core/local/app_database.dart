@@ -310,7 +310,10 @@ class AppDatabase {
     final ftsAvailable = await _ensureFts(db);
     await _migrate(db);
     final paths = await AppPaths.resolve(
-      overrideRoot: p.join(Directory.systemTemp.path, 'guwenreader-test'),
+      overrideRoot: p.join(
+        Directory.systemTemp.path,
+        'guwenreader-test-${newLocalId('run')}',
+      ),
     );
     return AppDatabase._(db, paths, ftsAvailable: ftsAvailable);
   }
@@ -325,6 +328,10 @@ class AppDatabase {
         'cost': 'REAL NOT NULL DEFAULT 0',
         'requests': 'INTEGER NOT NULL DEFAULT 0',
         'estimated_usage': 'INTEGER NOT NULL DEFAULT 0',
+        'heartbeat_at': 'TEXT',
+        'lease_owner': 'TEXT',
+        'stage': 'TEXT',
+        'checkpoint': 'TEXT',
       },
       'ai_usage': {'token_source': "TEXT NOT NULL DEFAULT 'provider_actual'"},
       'ai_models': {

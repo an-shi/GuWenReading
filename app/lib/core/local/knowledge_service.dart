@@ -6,8 +6,10 @@ import 'package:crypto/crypto.dart';
 import 'package:sqflite/sqflite.dart';
 
 import '../../data/models.dart';
+import 'ai_scheduler.dart';
 import 'ai_service.dart';
 import 'app_database.dart';
+import 'budget_service.dart';
 import 'local_models.dart';
 import 'local_store.dart';
 import 'tokenizer_adapter.dart';
@@ -17,11 +19,13 @@ class KnowledgeService {
     required this.store,
     required this.aiSettings,
     required this.client,
-  });
+    BudgetService? budgets,
+  }) : budgets = budgets ?? BudgetService(store: store);
 
   final LocalStore store;
   final AiSettingsService aiSettings;
   final AiJsonClient client;
+  final BudgetService budgets;
 
   static const _schemaVersion = 2;
 
@@ -30,9 +34,13 @@ class KnowledgeService {
       type: 'knowledge_extraction',
       chapterId: chapterId,
     );
-    if (active != null && active.status != 'paused') return active;
+    if (active != null &&
+        active.status != 'paused' &&
+        active.status != 'interrupted') {
+      return active;
+    }
     if (active != null) {
-      await store.updateTask(active.id, status: 'running', error: null);
+      await store.claimTask(active.id, appInstanceId, stage: '恢复知识抽取');
       unawaited(_runExtraction(active.id, chapterId));
       return (await store.getTask(active.id)) ?? active;
     }
@@ -45,11 +53,68 @@ class KnowledgeService {
       bookId: content.bookId,
       chapterId: chapterId,
     );
+    final resolved = await aiSettings.resolve(purpose: 'extraction');
+    final estimate = resolved == null
+        ? 0.0
+        : _estimateCost(content, resolved.model);
+    final reservation = await budgets.reserve(
+      taskId: task.id,
+      bookId: content.bookId,
+      chapterId: chapterId,
+      estimatedCost: estimate,
+    );
+    if (!reservation.allowed) {
+      await store.updateTask(
+        task.id,
+        status: 'failed',
+        error: reservation.message,
+      );
+      throw BudgetExceededException(reservation.message ?? '预算不足');
+    }
     unawaited(_runExtraction(task.id, chapterId));
     return task;
   }
 
+  double _estimateCost(ChapterContent content, AiModelRecord model) {
+    final tokenizer = TokenizerRegistry.forModel(model);
+    var tokens = 0;
+    for (final paragraph in content.paragraphs) {
+      for (final sentence in paragraph.sentences) {
+        tokens += tokenizer.count(sentence.originalText).tokens;
+      }
+    }
+    if (tokens == 0) return 0;
+    return budgets.estimateCost(
+      model: model,
+      inputTokens: (tokens * 1.15).round() + 600,
+      outputTokens: (tokens * 0.35).round() + 300,
+    );
+  }
+
+  /// Resumes an interrupted or paused extraction task. Cached chunks are
+  /// reused, so only unfinished chunks are requested again.
+  Future<void> resumeTask(String taskId) async {
+    final task = await store.getTask(taskId);
+    if (task == null ||
+        task.type != 'knowledge_extraction' ||
+        task.chapterId == null ||
+        task.status == 'cancelled' ||
+        task.status == 'completed') {
+      return;
+    }
+    await store.claimTask(taskId, appInstanceId, stage: '恢复知识抽取');
+    unawaited(_runExtraction(taskId, task.chapterId!));
+  }
+
   Future<void> _runExtraction(String taskId, String chapterId) async {
+    try {
+      await _runExtractionInner(taskId, chapterId);
+    } finally {
+      await budgets.release(taskId);
+    }
+  }
+
+  Future<void> _runExtractionInner(String taskId, String chapterId) async {
     final content = await store.chapterContent(chapterId);
     if (content == null) {
       await store.updateTask(taskId, status: 'failed', error: '章节不存在');
@@ -103,6 +168,7 @@ class KnowledgeService {
       total: chunks.length,
       progress: 0,
     );
+    await store.claimTask(taskId, appInstanceId, stage: '准备知识抽取');
     var completedChunks = 0;
     var failedChunks = 0;
     var cachedChunks = 0;
@@ -149,6 +215,12 @@ class KnowledgeService {
             temperature: 0.1,
             taskId: taskId,
             taskType: 'knowledge_extraction',
+            shouldCancel: () async {
+              final current = await store.getTask(taskId);
+              return current == null ||
+                  current.status == 'cancelled' ||
+                  current.status == 'paused';
+            },
           );
           await store.putKnowledgeChunkCache(
             chapterId: chapterId,
@@ -181,6 +253,13 @@ class KnowledgeService {
         completed: completedChunks,
         failedCount: failedChunks,
       );
+      await store.touchTask(
+        taskId,
+        stage: '知识抽取 ${index + 1}/${chunks.length} 块',
+        checkpoint: 'chunk:$index',
+      );
+      final current = await store.getTask(taskId);
+      if (current != null) await budgets.adjust(taskId, current.cost);
       if (await _pauseIfBudgetExceeded(taskId)) return;
     }
     final status = failedChunks == 0
@@ -215,16 +294,12 @@ class KnowledgeService {
   }
 
   Future<bool> _pauseIfBudgetExceeded(String taskId) async {
-    final budget = await readAiTaskBudget();
-    if (budget <= 0) return false;
-    final task = await store.getTask(taskId);
-    if (task == null || task.cost < budget) return false;
+    final message = await budgets.checkDuringTask(taskId);
+    if (message == null) return false;
     await store.updateTask(
       taskId,
       status: 'paused',
-      error:
-          '已达到单次任务费用上限（${task.cost.toStringAsFixed(4)} / '
-          '${budget.toStringAsFixed(4)}）。请提高预算后重新开始任务。',
+      error: '$message。请提高预算后重新开始任务。',
     );
     return true;
   }

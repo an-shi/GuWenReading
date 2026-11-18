@@ -3,6 +3,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:pdfrx/pdfrx.dart';
 
 import 'app/app.dart';
+import 'core/local/ai_scheduler.dart';
 import 'core/local/app_database.dart';
 import 'core/providers.dart';
 import 'core/storage/settings_controller.dart';
@@ -26,6 +27,8 @@ Future<void> main() async {
   );
   await container.read(settingsProvider.notifier).load();
   await container.read(aiSettingsProvider).seedPrompts();
+  await AiScheduler.instance.loadConfig(container.read(localStoreProvider));
+  await container.read(taskRecoveryServiceProvider).recoverOnStartup();
   runApp(
     UncontrolledProviderScope(container: container, child: const GuWenApp()),
   );

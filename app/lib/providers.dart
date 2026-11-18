@@ -12,12 +12,14 @@ export '../core/providers.dart'
         localApiProvider,
         localStoreProvider,
         aiSettingsProvider,
+        budgetServiceProvider,
         importServiceProvider,
         translationServiceProvider,
         knowledgeServiceProvider,
         searchServiceProvider,
         assistantServiceProvider,
-        backupServiceProvider;
+        backupServiceProvider,
+        taskRecoveryServiceProvider;
 export '../data/repositories/library_repository.dart'
     show BookshelfSnapshot, LibraryRepository, libraryRepositoryProvider;
 export '../data/repositories/reader_repository.dart'

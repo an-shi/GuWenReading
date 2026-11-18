@@ -8,12 +8,15 @@ import 'package:intl/intl.dart';
 import 'package:path/path.dart' as p;
 
 import '../../core/local/app_database.dart';
+import '../../core/local/ai_scheduler.dart';
 import '../../core/local/backup_service.dart';
+import '../../core/local/budget_service.dart';
 import '../../core/local/data_directory_service.dart';
 import '../../core/local/local_models.dart';
 import 'provider_editor.dart';
 import '../../core/providers.dart';
 import '../../core/storage/settings_controller.dart';
+import '../../data/models.dart';
 import '../../providers.dart';
 
 class SettingsScreen extends ConsumerStatefulWidget {
@@ -29,6 +32,7 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
   List<AiModelRecord> _models = const [];
   List<PromptRecord> _prompts = const [];
   List<BackupInfo> _backups = const [];
+  BudgetStatus _budgetStatus = const BudgetStatus();
   String? _selectedPromptKey;
   bool _busy = false;
 
@@ -46,12 +50,14 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
     final models = await ai.models();
     final prompts = await store.allPrompts();
     final files = await backups.listBackups();
+    final budgetStatus = await ref.read(budgetServiceProvider).status();
     if (!mounted) return;
     setState(() {
       _providers = providers;
       _models = models;
       _prompts = prompts;
       _backups = files;
+      _budgetStatus = budgetStatus;
       _selectedPromptKey ??= prompts.isEmpty ? null : prompts.first.key;
     });
   }
@@ -130,7 +136,6 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
 
   // ------------------------------------------------------------------- AI tab
   Widget _aiTab(ThemeData theme) {
-    final settings = ref.watch(settingsProvider);
     return ListView(
       padding: const EdgeInsets.fromLTRB(20, 8, 20, 40),
       children: [
@@ -236,26 +241,76 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
           title: '成本控制',
           subtitle: '单次 AI 任务的实际或估算费用达到上限时自动暂停；0 表示不限制。',
           action: OutlinedButton.icon(
-            onPressed: _editTaskBudget,
+            onPressed: _editBudgets,
             icon: const Icon(Icons.savings_outlined),
-            label: const Text('修改上限'),
+            label: const Text('预算设置'),
           ),
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              _InfoRow(
-                label: '单次任务上限',
-                value: settings.aiTaskBudget > 0
-                    ? settings.aiTaskBudget.toStringAsFixed(4)
-                    : '不限',
+              Wrap(
+                spacing: 10,
+                runSpacing: 8,
+                children: [
+                  _BudgetChip(status: _budgetStatus.daily),
+                  _BudgetChip(status: _budgetStatus.monthly),
+                  _BudgetChip(status: _budgetStatus.task),
+                ],
               ),
+              const SizedBox(height: 8),
+              Wrap(
+                spacing: 8,
+                children: [
+                  OutlinedButton(
+                    onPressed: _editBookBudget,
+                    child: const Text('书籍预算'),
+                  ),
+                  OutlinedButton(
+                    onPressed: _editChapterBudget,
+                    child: const Text('章节预算'),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 6),
               Text(
-                '费用按模型配置的每百万 Token 单价和 Provider 返回的 usage 估算；'
-                '未配置单价的模型费用按 0 计算。',
+                '费用按模型配置的每百万 Token 单价和 Provider 返回的 usage 计算；'
+                '任务开始前按本地 Tokenizer 预留费用，结束后释放未使用部分。',
                 style: theme.textTheme.bodySmall?.copyWith(
                   color: theme.colorScheme.onSurface.withValues(alpha: 0.45),
                   height: 1.6,
                 ),
+              ),
+            ],
+          ),
+        ),
+        const SizedBox(height: 14),
+        _SectionCard(
+          title: '调度与重试',
+          subtitle: '限制全局、Provider、模型和单任务的并发请求数；429 或服务异常时自动退避重试。',
+          action: OutlinedButton.icon(
+            onPressed: _editScheduler,
+            icon: const Icon(Icons.tune_rounded),
+            label: const Text('调整'),
+          ),
+          child: Wrap(
+            spacing: 10,
+            runSpacing: 8,
+            children: [
+              _UsageMetricInline(
+                label: '全局并发',
+                value: '${AiScheduler.instance.config.globalConcurrency}',
+              ),
+              _UsageMetricInline(
+                label: 'Provider 并发',
+                value: '${AiScheduler.instance.config.providerConcurrency}',
+              ),
+              _UsageMetricInline(
+                label: '模型并发',
+                value: '${AiScheduler.instance.config.modelConcurrency}',
+              ),
+              _UsageMetricInline(
+                label: '最大重试',
+                value: '${AiScheduler.instance.config.maxRetries}',
               ),
             ],
           ),
@@ -607,23 +662,88 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
     );
   }
 
-  // ----------------------------------------------------------------- dialogs
-  Future<void> _editTaskBudget() async {
-    final current = ref.read(settingsProvider).aiTaskBudget;
-    final controller = TextEditingController(
-      text: current > 0 ? current.toString() : '',
+  Future<void> _editScheduler() async {
+    final current = AiScheduler.instance.config;
+    final global = TextEditingController(text: '${current.globalConcurrency}');
+    final provider = TextEditingController(
+      text: '${current.providerConcurrency}',
+    );
+    final model = TextEditingController(text: '${current.modelConcurrency}');
+    final task = TextEditingController(text: '${current.taskConcurrency}');
+    final retries = TextEditingController(text: '${current.maxRetries}');
+    final interval = TextEditingController(
+      text: '${current.minRequestIntervalMs}',
     );
     final saved = await showDialog<bool>(
       context: context,
       builder: (context) => AlertDialog(
-        title: const Text('单次任务费用上限'),
-        content: TextField(
-          controller: controller,
-          autofocus: true,
-          keyboardType: const TextInputType.numberWithOptions(decimal: true),
-          decoration: const InputDecoration(
-            labelText: '费用上限',
-            hintText: '留空或 0 表示不限制',
+        title: const Text('调度与重试'),
+        content: SingleChildScrollView(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Row(
+                children: [
+                  Expanded(
+                    child: TextField(
+                      controller: global,
+                      keyboardType: TextInputType.number,
+                      decoration: const InputDecoration(labelText: '全局并发'),
+                    ),
+                  ),
+                  const SizedBox(width: 10),
+                  Expanded(
+                    child: TextField(
+                      controller: provider,
+                      keyboardType: TextInputType.number,
+                      decoration: const InputDecoration(
+                        labelText: 'Provider 并发',
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 10),
+              Row(
+                children: [
+                  Expanded(
+                    child: TextField(
+                      controller: model,
+                      keyboardType: TextInputType.number,
+                      decoration: const InputDecoration(labelText: '模型并发'),
+                    ),
+                  ),
+                  const SizedBox(width: 10),
+                  Expanded(
+                    child: TextField(
+                      controller: task,
+                      keyboardType: TextInputType.number,
+                      decoration: const InputDecoration(labelText: '单任务并发'),
+                    ),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 10),
+              Row(
+                children: [
+                  Expanded(
+                    child: TextField(
+                      controller: retries,
+                      keyboardType: TextInputType.number,
+                      decoration: const InputDecoration(labelText: '最大重试次数'),
+                    ),
+                  ),
+                  const SizedBox(width: 10),
+                  Expanded(
+                    child: TextField(
+                      controller: interval,
+                      keyboardType: TextInputType.number,
+                      decoration: const InputDecoration(labelText: '最小请求间隔 ms'),
+                    ),
+                  ),
+                ],
+              ),
+            ],
           ),
         ),
         actions: [
@@ -639,12 +759,275 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
       ),
     );
     if (saved == true) {
-      final value = double.tryParse(controller.text.trim()) ?? 0;
-      await ref.read(settingsProvider.notifier).setAiTaskBudget(value);
+      final config = current.copyWith(
+        globalConcurrency: int.tryParse(global.text.trim()) ?? 1,
+        providerConcurrency: int.tryParse(provider.text.trim()) ?? 1,
+        modelConcurrency: int.tryParse(model.text.trim()) ?? 1,
+        taskConcurrency: int.tryParse(task.text.trim()) ?? 1,
+        maxRetries: int.tryParse(retries.text.trim()) ?? 0,
+        minRequestIntervalMs: int.tryParse(interval.text.trim()) ?? 0,
+      );
+      await AiScheduler.instance.saveConfig(
+        ref.read(localStoreProvider),
+        config,
+      );
       if (mounted) setState(() {});
+    }
+    for (final controller in [
+      global,
+      provider,
+      model,
+      task,
+      retries,
+      interval,
+    ]) {
+      controller.dispose();
+    }
+  }
+
+  // ----------------------------------------------------------------- dialogs
+  Future<void> _editBudgets() async {
+    final budgets = ref.read(budgetServiceProvider);
+    final daily = TextEditingController(
+      text: _formatLimit(await budgets.limit(BudgetService.scopeDaily)),
+    );
+    final monthly = TextEditingController(
+      text: _formatLimit(await budgets.limit(BudgetService.scopeMonthly)),
+    );
+    final task = TextEditingController(
+      text: _formatLimit(await budgets.limit(BudgetService.scopeTask)),
+    );
+    if (!mounted) return;
+    final saved = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('全局与任务预算'),
+        content: SingleChildScrollView(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              TextField(
+                controller: daily,
+                keyboardType: const TextInputType.numberWithOptions(
+                  decimal: true,
+                ),
+                decoration: const InputDecoration(
+                  labelText: '每日全局预算',
+                  hintText: '0 表示不限制',
+                ),
+              ),
+              const SizedBox(height: 10),
+              TextField(
+                controller: monthly,
+                keyboardType: const TextInputType.numberWithOptions(
+                  decimal: true,
+                ),
+                decoration: const InputDecoration(
+                  labelText: '每月全局预算',
+                  hintText: '0 表示不限制',
+                ),
+              ),
+              const SizedBox(height: 10),
+              TextField(
+                controller: task,
+                keyboardType: const TextInputType.numberWithOptions(
+                  decimal: true,
+                ),
+                decoration: const InputDecoration(
+                  labelText: '单次任务预算',
+                  hintText: '0 表示不限制',
+                ),
+              ),
+              const Padding(
+                padding: EdgeInsets.only(top: 8),
+                child: Text(
+                  '预算单位为模型单价使用的币种。任务开始前会预留预计费用，'
+                  '并发任务不会共同突破同一预算。',
+                ),
+              ),
+            ],
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context, false),
+            child: const Text('取消'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(context, true),
+            child: const Text('保存'),
+          ),
+        ],
+      ),
+    );
+    if (saved == true) {
+      await budgets.setLimit(
+        scope: BudgetService.scopeDaily,
+        limit: double.tryParse(daily.text.trim()) ?? 0,
+      );
+      await budgets.setLimit(
+        scope: BudgetService.scopeMonthly,
+        limit: double.tryParse(monthly.text.trim()) ?? 0,
+      );
+      final taskLimit = double.tryParse(task.text.trim()) ?? 0;
+      await budgets.setLimit(scope: BudgetService.scopeTask, limit: taskLimit);
+      await ref.read(settingsProvider.notifier).setAiTaskBudget(taskLimit);
+      await _reload();
+    }
+    for (final controller in [daily, monthly, task]) {
+      controller.dispose();
+    }
+  }
+
+  Future<void> _editBookBudget() async {
+    final store = ref.read(localStoreProvider);
+    final books = await store.listBooks();
+    if (!mounted) return;
+    if (books.isEmpty) {
+      _toast('书库为空，无需设置书籍预算');
+      return;
+    }
+    final book = await showDialog<Book>(
+      context: context,
+      builder: (context) => SimpleDialog(
+        title: const Text('选择书籍'),
+        children: [
+          for (final item in books)
+            SimpleDialogOption(
+              onPressed: () => Navigator.pop(context, item),
+              child: Text(item.title),
+            ),
+        ],
+      ),
+    );
+    if (book == null || !mounted) return;
+    final budgets = ref.read(budgetServiceProvider);
+    final controller = TextEditingController(
+      text: _formatLimit(
+        await budgets.limit(BudgetService.scopeBook, scopeId: book.id),
+      ),
+    );
+    if (!mounted) return;
+    final saved = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: Text('《${book.title}》预算'),
+        content: TextField(
+          controller: controller,
+          keyboardType: const TextInputType.numberWithOptions(decimal: true),
+          decoration: const InputDecoration(
+            labelText: '累计费用上限',
+            hintText: '0 表示不限制',
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context, false),
+            child: const Text('取消'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(context, true),
+            child: const Text('保存'),
+          ),
+        ],
+      ),
+    );
+    if (saved == true) {
+      await budgets.setLimit(
+        scope: BudgetService.scopeBook,
+        scopeId: book.id,
+        limit: double.tryParse(controller.text.trim()) ?? 0,
+      );
+      await _reload();
     }
     controller.dispose();
   }
+
+  Future<void> _editChapterBudget() async {
+    final store = ref.read(localStoreProvider);
+    final books = await store.listBooks();
+    if (!mounted) return;
+    if (books.isEmpty) {
+      _toast('书库为空，无需设置章节预算');
+      return;
+    }
+    final book = await showDialog<Book>(
+      context: context,
+      builder: (context) => SimpleDialog(
+        title: const Text('选择书籍'),
+        children: [
+          for (final item in books)
+            SimpleDialogOption(
+              onPressed: () => Navigator.pop(context, item),
+              child: Text(item.title),
+            ),
+        ],
+      ),
+    );
+    if (book == null || !mounted) return;
+    final chapters = await store.listChapters(book.id);
+    if (!mounted) return;
+    if (chapters.isEmpty) {
+      _toast('该书籍没有章节');
+      return;
+    }
+    final chapter = await showDialog<ChapterSummary>(
+      context: context,
+      builder: (context) => SimpleDialog(
+        title: const Text('选择章节'),
+        children: [
+          for (final item in chapters)
+            SimpleDialogOption(
+              onPressed: () => Navigator.pop(context, item),
+              child: Text(item.title),
+            ),
+        ],
+      ),
+    );
+    if (chapter == null || !mounted) return;
+    final budgets = ref.read(budgetServiceProvider);
+    final controller = TextEditingController(
+      text: _formatLimit(
+        await budgets.limit(BudgetService.scopeChapter, scopeId: chapter.id),
+      ),
+    );
+    if (!mounted) return;
+    final saved = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: Text('章节预算：${chapter.title}'),
+        content: TextField(
+          controller: controller,
+          keyboardType: const TextInputType.numberWithOptions(decimal: true),
+          decoration: const InputDecoration(
+            labelText: '累计费用上限',
+            hintText: '0 表示不限制',
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context, false),
+            child: const Text('取消'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(context, true),
+            child: const Text('保存'),
+          ),
+        ],
+      ),
+    );
+    if (saved == true) {
+      await budgets.setLimit(
+        scope: BudgetService.scopeChapter,
+        scopeId: chapter.id,
+        limit: double.tryParse(controller.text.trim()) ?? 0,
+      );
+      await _reload();
+    }
+    controller.dispose();
+  }
+
+  String _formatLimit(double value) => value <= 0 ? '0' : '$value';
 
   Future<void> _editProvider(AiProviderRecord? provider) async {
     final ai = ref.read(aiSettingsProvider);
@@ -1340,6 +1723,67 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
     if (bytes < 1024) return '$bytes B';
     if (bytes < 1024 * 1024) return '${(bytes / 1024).toStringAsFixed(1)} KB';
     return '${(bytes / 1024 / 1024).toStringAsFixed(1)} MB';
+  }
+}
+
+class _BudgetChip extends StatelessWidget {
+  const _BudgetChip({required this.status});
+
+  final BudgetScopeStatus status;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final limitText = status.limit <= 0
+        ? '不限'
+        : '剩 ${status.remaining.toStringAsFixed(4)}';
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 9, vertical: 5),
+      decoration: BoxDecoration(
+        color: theme.colorScheme.primary.withValues(alpha: 0.055),
+        borderRadius: BorderRadius.circular(7),
+      ),
+      child: Text(
+        '${status.label} $limitText · 已用 ${status.spent.toStringAsFixed(4)}'
+        '${status.reserved > 0 ? ' · 预留 ${status.reserved.toStringAsFixed(4)}' : ''}',
+        style: theme.textTheme.labelSmall?.copyWith(
+          color: theme.colorScheme.onSurface.withValues(alpha: 0.6),
+        ),
+      ),
+    );
+  }
+}
+
+class _UsageMetricInline extends StatelessWidget {
+  const _UsageMetricInline({required this.label, required this.value});
+
+  final String label;
+  final String value;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 9, vertical: 5),
+      decoration: BoxDecoration(
+        color: theme.colorScheme.primary.withValues(alpha: 0.055),
+        borderRadius: BorderRadius.circular(7),
+      ),
+      child: Text.rich(
+        TextSpan(
+          text: '$label ',
+          style: theme.textTheme.labelSmall?.copyWith(
+            color: theme.colorScheme.onSurface.withValues(alpha: 0.5),
+          ),
+          children: [
+            TextSpan(
+              text: value,
+              style: const TextStyle(fontWeight: FontWeight.w600),
+            ),
+          ],
+        ),
+      ),
+    );
   }
 }
 

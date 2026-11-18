@@ -7,7 +7,9 @@ import 'package:crypto/crypto.dart';
 import 'package:sqflite/sqflite.dart';
 
 import '../../data/models.dart';
+import 'ai_scheduler.dart';
 import 'ai_service.dart';
+import 'budget_service.dart';
 import 'local_models.dart';
 import 'local_store.dart';
 import 'tokenizer_adapter.dart';
@@ -17,11 +19,13 @@ class TranslationService {
     required this.store,
     required this.aiSettings,
     required this.client,
-  });
+    BudgetService? budgets,
+  }) : budgets = budgets ?? BudgetService(store: store);
 
   final LocalStore store;
   final AiSettingsService aiSettings;
   final AiJsonClient client;
+  final BudgetService budgets;
 
   static const _cachePolicyVersion = 2;
 
@@ -33,14 +37,20 @@ class TranslationService {
       type: 'translation',
       chapterId: chapterId,
     );
-    if (active != null && active.status != 'paused') return active;
+    if (active != null &&
+        active.status != 'paused' &&
+        active.status != 'interrupted') {
+      return active;
+    }
     if (active != null) {
-      await store.updateTask(active.id, status: 'running', error: null);
+      await store.claimTask(active.id, appInstanceId, stage: '恢复翻译');
       unawaited(_run(active.id, chapterId, retranslate));
       return (await store.getTask(active.id)) ?? active;
     }
     final content = await store.chapterContent(chapterId);
     if (content == null) throw TranslationException('章节不存在');
+    final resolved = await aiSettings.resolve(purpose: 'translation');
+    final estimate = await _estimateCost(content, resolved, retranslate);
     final task = await store.createTask(
       type: 'translation',
       title: '翻译《${content.bookTitle}》· ${content.chapterTitle}',
@@ -51,11 +61,75 @@ class TranslationService {
       bookId: content.bookId,
       chapterId: chapterId,
     );
+    final reservation = await budgets.reserve(
+      taskId: task.id,
+      bookId: content.bookId,
+      chapterId: chapterId,
+      estimatedCost: estimate,
+    );
+    if (!reservation.allowed) {
+      await store.updateTask(
+        task.id,
+        status: 'failed',
+        error: reservation.message,
+      );
+      throw BudgetExceededException(reservation.message ?? '预算不足');
+    }
     unawaited(_run(task.id, chapterId, retranslate));
     return task;
   }
 
+  Future<double> _estimateCost(
+    ChapterContent content,
+    ResolvedAiModel? resolved,
+    bool retranslate,
+  ) async {
+    if (resolved == null) return 0;
+    final tokenizer = TokenizerRegistry.forModel(resolved.model);
+    var tokens = 0;
+    for (final paragraph in content.paragraphs) {
+      for (final sentence in paragraph.sentences) {
+        if (sentence.translation?.isManual ?? false) continue;
+        if (!retranslate && sentence.translation != null) continue;
+        tokens += tokenizer.count(sentence.originalText).tokens;
+      }
+    }
+    if (tokens == 0) return 0;
+    return budgets.estimateCost(
+      model: resolved.model,
+      inputTokens: (tokens * 1.15).round() + 500,
+      outputTokens: (tokens * 1.3).round() + 200,
+    );
+  }
+
+  /// Resumes an interrupted or paused task without creating a duplicate.
+  /// Successfully translated sentences and caches are reused.
+  Future<void> resumeTask(String taskId) async {
+    final task = await store.getTask(taskId);
+    if (task == null ||
+        task.type != 'translation' ||
+        task.chapterId == null ||
+        task.status == 'cancelled' ||
+        task.status == 'completed') {
+      return;
+    }
+    await store.claimTask(taskId, appInstanceId, stage: '恢复翻译');
+    unawaited(_run(taskId, task.chapterId!, false));
+  }
+
   Future<void> _run(String taskId, String chapterId, bool retranslate) async {
+    try {
+      await _runInner(taskId, chapterId, retranslate);
+    } finally {
+      await budgets.release(taskId);
+    }
+  }
+
+  Future<void> _runInner(
+    String taskId,
+    String chapterId,
+    bool retranslate,
+  ) async {
     final content = await store.chapterContent(chapterId);
     if (content == null) {
       await store.updateTask(taskId, status: 'failed', error: '章节不存在');
@@ -88,9 +162,11 @@ class TranslationService {
     }
     final total = targets.length;
     await store.updateTask(taskId, status: 'running', total: total);
+    await store.claimTask(taskId, appInstanceId, stage: '准备翻译');
     var completed = 0;
     var failed = 0;
     var cached = 0;
+    var batchCount = 0;
 
     final pending = <Sentence>[];
     final cacheKeys = <String, String>{};
@@ -202,6 +278,12 @@ class TranslationService {
             prompt: prompt,
             taskId: taskId,
             taskType: 'translation',
+            shouldCancel: () async {
+              final current = await store.getTask(taskId);
+              return current == null ||
+                  current.status == 'cancelled' ||
+                  current.status == 'paused';
+            },
           );
           await store.db.insert('translation_cache', {
             'cache_key': cacheKey,
@@ -265,6 +347,14 @@ class TranslationService {
         completed: completed,
         failedCount: failed,
       );
+      batchCount += 1;
+      await store.touchTask(
+        taskId,
+        stage: '翻译批次 $batchCount',
+        checkpoint: batch.last.id,
+      );
+      final current = await store.getTask(taskId);
+      if (current != null) await budgets.adjust(taskId, current.cost);
       if (await _pauseIfBudgetExceeded(taskId)) return;
     }
     await store.refreshBookStats(content.bookId);
@@ -361,16 +451,12 @@ class TranslationService {
   }
 
   Future<bool> _pauseIfBudgetExceeded(String taskId) async {
-    final budget = await readAiTaskBudget();
-    if (budget <= 0) return false;
-    final task = await store.getTask(taskId);
-    if (task == null || task.cost < budget) return false;
+    final message = await budgets.checkDuringTask(taskId);
+    if (message == null) return false;
     await store.updateTask(
       taskId,
       status: 'paused',
-      error:
-          '已达到单次任务费用上限（${task.cost.toStringAsFixed(4)} / '
-          '${budget.toStringAsFixed(4)}）。请提高预算后重新开始任务。',
+      error: '$message。请提高预算后重新开始任务。',
     );
     return true;
   }

@@ -20,7 +20,7 @@ cd app
 flutter test
 ```
 
-结果：`18 tests passed`
+结果：`24 tests passed`
 
 覆盖：
 
@@ -36,6 +36,9 @@ flutter test
 - Tokenizer Adapter：模型系列识别、配置覆盖、本地 Tokenizer 注册、CJK/Latin 估算和 Token 来源标记。
 - 连接测试计量：成功和失败都写入 `ai_usage`，按 `connection_test` 单独统计。
 - 完整/轻量备份：完整备份保留缓存和 `ai_usage`，轻量备份清空缓存；恢复保留正式数据与用量；过新版本备份被拒绝。
+- 全局调度：全局/Provider/模型/任务并发、429 重试与计量、不可重试错误直接失败。
+- 三级预算：每日全局、书籍、章节、任务预算；并发预留、释放和运行中预算检查。
+- 任务心跳与恢复：跨进程遗留 `running` 任务标记为 `interrupted`，恢复时复用已保存结果。
 
 ### Android 构建
 
@@ -84,7 +87,7 @@ flutter build windows --debug
 - Windows 端关闭 Flutter 的 MSAA/UIA 无障碍树，规避 Flutter 3.47 引擎在原生文件对话框关闭时 `AccessibilityBridge::CreateRemoveReparentedNodesUpdate` 的崩溃。
 - 书架支持编辑书籍信息与永久删除；使用临时数据库验证删除会清理章节、句子、译文、批注、书签、进度、人物、关系、事件、任务、助手会话、FTS 索引及原始文件。
 - AI 流水线使用本地 Mock OpenAI 兼容服务验证：Token/费用计量、翻译短 ID、逐句/批次缓存、任务去重、联合抽取、长章节分块、失败块重试、事件证据合并、重复抽取跳过、单次预算暂停。
-- 验证方式：`flutter analyze` 无问题，`flutter test` 18 项通过，`flutter build windows --debug` 成功且应用可打开。
+- 验证方式：`flutter analyze` 无问题，`flutter test` 24 项通过，`flutter build windows --debug` 成功且应用可打开。
 
 ## 3. 验证过的核心路径
 
@@ -114,4 +117,5 @@ flutter build windows --debug
 4. 导入文本型 PDF，确认 PDFium 路径。
 5. 导入扫描版 PDF，确认被明确拒绝。
 6. 创建/导出/恢复备份，确认重启后数据一致。
+
 

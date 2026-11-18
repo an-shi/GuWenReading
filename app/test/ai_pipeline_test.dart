@@ -3,7 +3,9 @@ import 'dart:io';
 
 import 'package:flutter_test/flutter_test.dart';
 import 'package:guwenreader/core/local/ai_service.dart';
+import 'package:guwenreader/core/local/ai_scheduler.dart';
 import 'package:guwenreader/core/local/app_database.dart';
+import 'package:guwenreader/core/local/budget_service.dart';
 import 'package:guwenreader/core/local/import_service.dart';
 import 'package:guwenreader/core/local/knowledge_service.dart';
 import 'package:guwenreader/core/local/local_models.dart';
@@ -42,7 +44,7 @@ void main() {
         if (content.contains('"entities"') || content.contains('实体类型')) {
           knowledgeRequests += 1;
           if (failKnowledgeAt == knowledgeRequests) {
-            request.response.statusCode = 500;
+            request.response.statusCode = 400;
             request.response.write(
               jsonEncode({
                 'error': {'message': 'mock failure'},
@@ -198,6 +200,24 @@ void main() {
       expect(cachedResult.status, 'completed');
       expect(translationRequests, requestsBeforeCache);
 
+      await store.db.update(
+        'tasks',
+        {'status': 'running', 'lease_owner': 'previous-process'},
+        where: 'id = ?',
+        whereArgs: [cachedTask.id],
+      );
+      final interrupted = await store.recoverStaleTasks(appInstanceId);
+      expect(
+        interrupted.any(
+          (task) => task.id == cachedTask.id && task.status == 'interrupted',
+        ),
+        isTrue,
+      );
+      await translation.resumeTask(cachedTask.id);
+      final resumed = await _waitForTask(store, cachedTask.id);
+      expect(resumed.status, 'completed');
+      expect(translationRequests, requestsBeforeCache);
+
       final firstSentence = content.paragraphs.first.sentences.first;
       await translation.retranslateSentence(firstSentence.id);
       expect(translationRequests, requestsBeforeCache);
@@ -262,10 +282,18 @@ void main() {
       await store.db.delete('translation_sentence_cache');
       await store.db.delete('translation_cache');
       await store.db.update('sentences', {'translation_state': 'pending'});
-      final budgetTask = await translation.startChapterTranslation(chapter.id);
-      final paused = await _waitForTask(store, budgetTask.id);
-      expect(paused.status, 'paused');
-      expect(paused.cost, greaterThan(0));
+      await expectLater(
+        translation.startChapterTranslation(chapter.id),
+        throwsA(isA<BudgetExceededException>()),
+      );
+      final rejected = await store.getTask(
+        (await store.tasks())
+            .firstWhere(
+              (task) => task.type == 'translation' && task.status == 'failed',
+            )
+            .id,
+      );
+      expect(rejected?.error, contains('预算'));
 
       final summary = await store.aiUsageSummary();
       expect(summary.requests, greaterThan(0));
@@ -315,8 +343,9 @@ void main() {
 
       await database.close();
       await server.close(force: true);
-      final temp = Directory('${Directory.systemTemp.path}/guwenreader-test');
-      if (await temp.exists()) await temp.delete(recursive: true);
+      if (await database.paths.root.exists()) {
+        await database.paths.root.delete(recursive: true);
+      }
     },
     timeout: const Timeout(Duration(minutes: 5)),
   );

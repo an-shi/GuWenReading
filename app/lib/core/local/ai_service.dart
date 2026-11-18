@@ -1,4 +1,6 @@
+import 'dart:async';
 import 'dart:convert';
+import 'dart:math' as math;
 
 import 'package:collection/collection.dart';
 import 'package:dio/dio.dart';
@@ -7,6 +9,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 
 import 'local_models.dart';
 import 'local_store.dart';
+import 'ai_scheduler.dart';
 import 'prompt_defaults.dart';
 import 'tokenizer_adapter.dart';
 
@@ -22,6 +25,10 @@ class AiRequestException implements Exception {
   final String message;
   @override
   String toString() => message;
+}
+
+class AiRequestCancelledException extends AiRequestException {
+  AiRequestCancelledException() : super('AI 请求已取消');
 }
 
 class RemoteAiModel {
@@ -943,10 +950,38 @@ class AiJsonClient {
     String? taskId,
     String taskType = 'other',
     int retryCount = 0,
+    Future<bool> Function()? shouldCancel,
   }) async {
     final resolved = await settings.resolve(purpose: purpose);
     if (resolved == null) throw AiNotConfiguredException();
-    final stopwatch = Stopwatch()..start();
+    return AiScheduler.instance.run(
+      providerId: resolved.provider.id,
+      modelId: resolved.model.id,
+      taskId: taskId,
+      priority: taskType == 'connection_test' ? 60 : 20,
+      action: () => _performChat(
+        resolved: resolved,
+        prompt: prompt,
+        jsonMode: jsonMode,
+        temperature: temperature,
+        taskId: taskId,
+        taskType: taskType,
+        retryCount: retryCount,
+        shouldCancel: shouldCancel,
+      ),
+    );
+  }
+
+  Future<String> _performChat({
+    required ResolvedAiModel resolved,
+    required String prompt,
+    required bool jsonMode,
+    required double temperature,
+    required String? taskId,
+    required String taskType,
+    required int retryCount,
+    required Future<bool> Function()? shouldCancel,
+  }) async {
     final dio = Dio(
       BaseOptions(
         connectTimeout: const Duration(seconds: 15),
@@ -969,52 +1004,89 @@ class AiJsonClient {
       jsonMode: jsonMode,
       temperature: temperature,
     );
-    dynamic responseData;
-    String text;
+    final config = AiScheduler.instance.config;
+    final maxAttempts = math.max(1, config.maxRetries + 1);
     try {
-      final response = await dio.post<dynamic>(
-        url,
-        data: body,
-        options: Options(headers: headers),
-      );
-      responseData = response.data;
-      text = _extractText(resolved, responseData);
-    } on DioException catch (error) {
-      stopwatch.stop();
-      final reported = _parseProviderUsage(responseData: error.response?.data);
-      await _recordUsage(
-        resolved: resolved,
-        taskId: taskId,
-        taskType: taskType,
-        prompt: prompt,
-        responseText: '',
-        reported: reported,
-        durationMs: stopwatch.elapsedMilliseconds,
-        status: 'failed',
-        error: _dioMessage(error),
-        retryCount: retryCount,
-      );
-      throw AiRequestException(_dioMessage(error));
+      for (var attempt = 0; attempt < maxAttempts; attempt++) {
+        if (shouldCancel != null && await shouldCancel()) {
+          throw AiRequestCancelledException();
+        }
+        final stopwatch = Stopwatch()..start();
+        dynamic responseData;
+        try {
+          final response = await dio.post<dynamic>(
+            url,
+            data: body,
+            options: Options(headers: headers),
+          );
+          responseData = response.data;
+          final text = _extractText(resolved, responseData);
+          stopwatch.stop();
+          final success = text.trim().isNotEmpty;
+          await _recordUsage(
+            resolved: resolved,
+            taskId: taskId,
+            taskType: taskType,
+            prompt: prompt,
+            responseText: text,
+            reported: _parseProviderUsage(responseData: responseData),
+            durationMs: stopwatch.elapsedMilliseconds,
+            status: success ? 'success' : 'failed',
+            error: success ? null : 'AI 服务返回了空响应',
+            retryCount: attempt,
+          );
+          if (!success) throw AiRequestException('AI 服务返回了空响应');
+          return text;
+        } on DioException catch (error) {
+          stopwatch.stop();
+          await _recordUsage(
+            resolved: resolved,
+            taskId: taskId,
+            taskType: taskType,
+            prompt: prompt,
+            responseText: '',
+            reported: _parseProviderUsage(responseData: error.response?.data),
+            durationMs: stopwatch.elapsedMilliseconds,
+            status: 'failed',
+            error: _dioMessage(error),
+            retryCount: attempt,
+          );
+          if (attempt >= maxAttempts - 1 || !_isRetryable(error)) {
+            throw AiRequestException(_dioMessage(error));
+          }
+          await Future<void>.delayed(_retryDelay(error, attempt, config));
+        }
+      }
+      throw AiRequestException('AI 请求重试次数已用尽');
     } finally {
       dio.close();
     }
-    stopwatch.stop();
-    final reported = _parseProviderUsage(responseData: responseData);
-    final success = text.trim().isNotEmpty;
-    await _recordUsage(
-      resolved: resolved,
-      taskId: taskId,
-      taskType: taskType,
-      prompt: prompt,
-      responseText: text,
-      reported: reported,
-      durationMs: stopwatch.elapsedMilliseconds,
-      status: success ? 'success' : 'failed',
-      error: success ? null : 'AI 服务返回了空响应',
-      retryCount: retryCount,
-    );
-    if (!success) throw AiRequestException('AI 服务返回了空响应');
-    return text;
+  }
+
+  bool _isRetryable(DioException error) {
+    final status = error.response?.statusCode;
+    if (status == 429 || (status != null && status >= 500 && status < 600)) {
+      return true;
+    }
+    return error.type == DioExceptionType.connectionTimeout ||
+        error.type == DioExceptionType.receiveTimeout ||
+        error.type == DioExceptionType.sendTimeout ||
+        error.type == DioExceptionType.connectionError;
+  }
+
+  Duration _retryDelay(
+    DioException error,
+    int attempt,
+    AiSchedulerConfig config,
+  ) {
+    final retryAfter = error.response?.headers.value('retry-after');
+    final seconds = retryAfter == null ? null : int.tryParse(retryAfter.trim());
+    if (seconds != null && seconds >= 0) {
+      return Duration(milliseconds: math.min(seconds * 1000, 60000));
+    }
+    final base = config.baseBackoffMs * (1 << attempt);
+    final jitter = math.Random().nextInt(math.max(1, config.baseBackoffMs));
+    return Duration(milliseconds: math.min(base + jitter, config.maxBackoffMs));
   }
 
   Future<Map<String, dynamic>> chatJson({
@@ -1024,6 +1096,7 @@ class AiJsonClient {
     String? taskId,
     String taskType = 'other',
     int retryCount = 0,
+    Future<bool> Function()? shouldCancel,
   }) async {
     final text = await chat(
       purpose: purpose,
@@ -1033,6 +1106,7 @@ class AiJsonClient {
       taskId: taskId,
       taskType: taskType,
       retryCount: retryCount,
+      shouldCancel: shouldCancel,
     );
     return parseJsonObject(text);
   }

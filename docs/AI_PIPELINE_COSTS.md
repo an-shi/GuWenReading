@@ -420,14 +420,73 @@ cache_read_price, cache_write_price
 - 成本控制增加“单次任务费用上限”。
 - 达到上限时任务暂停，错误提示包含当前费用和上限。
 
-## 4. 任务去重、取消与恢复
+## 4. 任务去重、调度、取消与恢复
+
+### 4.1 去重
 
 - 翻译任务按 `chapter_id + type=translation` 查重。
 - 知识抽取任务按 `chapter_id + type=knowledge_extraction` 查重。
-- 运行中任务直接返回已有任务，不创建新任务。
-- 暂停任务再次启动时恢复，已成功句子/块不重复计费。
-- 取消任务在批次/块边界生效；当前已发出的请求可能仍会计费并记录 usage。
-- 任务状态和实际执行状态以 `tasks` 表为准。
+- 运行中/暂停/中断任务直接返回已有任务，不创建新任务。
+- 暂停或中断任务再次启动时恢复，已成功句子/块不重复计费。
+
+### 4.2 全局调度与重试
+
+`ai_scheduler.dart` 为所有 AI 请求提供统一并发控制：
+
+- 全局并发、Provider 并发、模型并发、单任务并发。
+- Provider 最小请求间隔。
+- 优先级队列：用户任务优先于连接测试等辅助请求。
+- 429/5xx/超时会按 `Retry-After` 或指数退避 + 抖动重试；最大次数可配置。
+- 400/401/403/404 等配置类错误不重试，直接返回。
+- 每次重试都单独写入 `ai_usage`，记录 `retry_count`。
+- 取消/暂停任务时，排队中的请求会在发送前再次检查任务状态。
+
+设置页“调度与重试”可修改并发数、最大重试次数和最小请求间隔，配置保存在 `app_settings.ai_scheduler_config`。
+
+### 4.3 心跳与自动恢复
+
+任务表新增：
+
+- `heartbeat_at`：最后心跳时间。
+- `lease_owner`：当前进程标识。
+- `stage`：当前处理阶段。
+- `checkpoint`：最后一个成功句子 ID 或块索引。
+
+应用启动时：
+
+1. 使用当前实例 ID 扫描 `running` 任务。
+2. `lease_owner` 不是当前进程的任务标记为 `interrupted`。
+3. 自动调用翻译/知识抽取的 `resumeTask`。
+4. 恢复时重新计算目标句子/块，已落库句子、块缓存、逐句缓存全部复用。
+5. 任务中心显示“已中断”和“恢复”按钮；手动恢复与自动恢复使用同一路径。
+
+不会把 `running` 任务简单改成 `pending`，也不会重复处理已成功保存的数据。人工译文和人工审核数据不会被恢复流程覆盖。
+
+### 4.4 三级预算与预留
+
+`BudgetService` 在原有单次任务上限上增加：
+
+- 每日全局预算。
+- 每月全局预算。
+- 书籍累计预算。
+- 章节累计预算。
+- 单任务预算（兼容旧 `ai_task_budget` 设置）。
+
+任务启动前：
+
+1. 用本地 Tokenizer 估算输入/输出 Token 和费用。
+2. 在同一个 SQLite 事务内检查所有适用预算。
+3. 检查已发生费用 + 其他任务有效预留 + 本次预计费用。
+4. 通过后写入 `ai_budget_reservations`；不通过则任务标记失败并提示具体哪一级预算不足。
+
+任务运行中：
+
+- 每次批次/块后根据实际 `task.cost` 收缩预留。
+- 实际费用或其他任务预留触达上限时自动暂停。
+- 暂停/失败/取消/完成时释放剩余预留。
+- 已产生译文和知识数据不会因预算不足被删除。
+
+设置页可配置每日、每月、单任务、书籍和章节预算，并显示已用、预留和剩余金额。
 
 ## 5. 数据库变化
 
@@ -437,11 +496,15 @@ cache_read_price, cache_write_price
 - `translation_sentence_cache`
 - `knowledge_chunk_cache`
 - `knowledge_extraction_state`
+- `ai_budget_limits`
+- `ai_budget_reservations`
 
 新增/变更列：
 
-- `tasks.input_tokens/output_tokens/cache_read_tokens/cache_write_tokens/cost/requests`
-- `ai_models.input_price/output_price/cache_read_price/cache_write_price/is_default_extraction`
+- `tasks.input_tokens/output_tokens/cache_read_tokens/cache_write_tokens/cost/requests/estimated_usage`
+- `tasks.heartbeat_at/lease_owner/stage/checkpoint`
+- `ai_models.input_price/output_price/cache_read_price/cache_write_price/is_default_extraction/tokenizer`
+- `ai_usage.token_source`
 - `historical_events.fingerprint` + 唯一索引
 
 兼容策略：
@@ -450,7 +513,7 @@ cache_read_price, cache_write_price
 - 新表使用 `CREATE TABLE IF NOT EXISTS`。
 - 旧书籍、译文、实体、关系、事件数据不删除。
 - 新缓存表可重建；正式翻译/知识数据不会因缓存清理而丢失。
-- 旧任务没有 Token 字段，显示为 0。
+- 旧任务没有 Token 字段，显示为 0，也不会被启动恢复流程重复处理。
 
 ## 6. 测试与实测
 
@@ -517,11 +580,11 @@ cache_read_price, cache_write_price
 
 ### 7.4 预算粒度
 
-当前只有“单次任务费用上限”。尚未提供单章节、单本书预算；可在设置中增加多级预算，并在启动前根据历史 token 估算费用。
+已提供每日/每月全局、书籍、章节、单任务预算和启动前预留。预算预估基于本地 Tokenizer 和模型单价，不等同于 Provider 最终账单；实际费用仍以 `ai_usage` 为准。
 
 ### 7.5 自动恢复
 
-应用重启后不会自动重新启动 running 任务；用户再次点击会利用句子/块缓存继续。后续可在任务启动时检测未完成任务并提示恢复。
+应用启动时会标记上一进程遗留的 `running` 任务为 `interrupted`，并自动恢复翻译/知识抽取。已成功句子、块缓存和逐句缓存全部复用；人工确认数据不会被覆盖。
 
 ### 7.6 实体消歧
 
@@ -547,7 +610,7 @@ cache_read_price, cache_write_price
 
 ### 7.10 并发与重试
 
-单个任务内部串行处理批次/块，没有无限并发；但不同章节的任务目前可以同时启动，尚未加入全局任务队列/并发上限。网络失败不会自动重试，由用户再次启动任务，已成功的结果会从缓存复用，不会重复发送。
+已实现全局/Provider/模型/任务四级并发和 429 退避重试。重试只针对可恢复错误；配置类错误直接失败。取消任务时，尚未发送的排队请求会在发送前检查任务状态。
 
 ## 8. 成本优化检查清单
 
@@ -563,6 +626,9 @@ cache_read_price, cache_write_price
 - [x] 实体复用、关系证据合并
 - [x] 事件指纹去重
 - [x] 单次任务预算暂停
+- [x] 每日/每月/书籍/章节/任务预算与预留
+- [x] 全局调度、并发限制与 429 退避重试
+- [x] 任务心跳、异常中断标记与启动自动恢复
 - [x] 连接测试用量与费用统计
 - [x] 知识抽取模型/问答模型回退
 - [x] 模型级 Tokenizer Adapter 与来源标记（provider_actual/local_tokenizer/local_estimate）
@@ -570,7 +636,5 @@ cache_read_price, cache_write_price
 - [ ] 内置各厂商精确 BPE 词表
 - [ ] Provider 原生 Prompt Caching
 - [ ] Batch API
-- [ ] 单章节/单本书预算
-- [ ] 应用重启自动恢复任务
 - [ ] 多候选实体 AI 消歧
 - [x] 备份 AI 用量、任务与缓存（完整/轻量）

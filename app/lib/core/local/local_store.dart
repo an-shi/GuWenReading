@@ -992,10 +992,87 @@ class LocalStore {
     cost: (row['cost'] as num? ?? 0).toDouble(),
     requests: row['requests'] as int? ?? 0,
     estimatedUsage: row['estimated_usage'] as int? ?? 0,
+    heartbeatAt: row['heartbeat_at'] as String?,
+    leaseOwner: row['lease_owner'] as String?,
+    stage: row['stage'] as String?,
+    checkpoint: row['checkpoint'] as String?,
   );
 
   Future<void> cancelTask(String id) async {
     await updateTask(id, status: 'cancelled');
+  }
+
+  Future<void> claimTask(String id, String owner, {String? stage}) async {
+    final now = nowIso();
+    await db.update(
+      'tasks',
+      {
+        'status': 'running',
+        'lease_owner': owner,
+        'heartbeat_at': now,
+        'stage': stage,
+        'updated_at': now,
+      },
+      where: 'id = ?',
+      whereArgs: [id],
+    );
+  }
+
+  Future<void> touchTask(
+    String id, {
+    String? stage,
+    String? checkpoint,
+    String? error,
+  }) async {
+    final now = nowIso();
+    await db.update(
+      'tasks',
+      {
+        'heartbeat_at': now,
+        'updated_at': now,
+        if (stage != null) 'stage': stage,
+        if (checkpoint != null) 'checkpoint': checkpoint,
+        if (error != null) 'error': error,
+      },
+      where: 'id = ?',
+      whereArgs: [id],
+    );
+  }
+
+  /// Marks tasks owned by another process as interrupted.
+  ///
+  /// Returns the interrupted tasks so the caller can decide whether to resume
+  /// them. Results already persisted by the previous run stay untouched.
+  Future<List<TaskInfo>> recoverStaleTasks(String currentOwner) async {
+    final now = nowIso();
+    await db.update(
+      'tasks',
+      {
+        'status': 'interrupted',
+        'error': '应用上次退出时任务未完成，可点击任务恢复继续',
+        'lease_owner': null,
+        'updated_at': now,
+      },
+      where: "status = 'running' AND COALESCE(lease_owner, '') <> ?",
+      whereArgs: [currentOwner],
+    );
+    final rows = await db.query(
+      'tasks',
+      where: "status = 'interrupted'",
+      orderBy: 'created_at DESC',
+      limit: 50,
+    );
+    return rows.map(_taskFromRow).toList();
+  }
+
+  Future<List<TaskInfo>> interruptedTasks() async {
+    final rows = await db.query(
+      'tasks',
+      where: "status = 'interrupted'",
+      orderBy: 'created_at DESC',
+      limit: 50,
+    );
+    return rows.map(_taskFromRow).toList();
   }
 
   Future<TaskInfo?> activeTask({
@@ -1005,8 +1082,8 @@ class LocalStore {
     final rows = await db.query(
       'tasks',
       where: chapterId == null
-          ? "type = ? AND status IN ('queued','running','paused')"
-          : "type = ? AND chapter_id = ? AND status IN ('queued','running','paused')",
+          ? "type = ? AND status IN ('queued','running','paused','interrupted')"
+          : "type = ? AND chapter_id = ? AND status IN ('queued','running','paused','interrupted')",
       whereArgs: chapterId == null ? [type] : [type, chapterId],
       orderBy: 'created_at DESC',
       limit: 1,

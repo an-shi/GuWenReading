@@ -58,13 +58,15 @@
 
 ### 任务与 AI
 
-- `tasks`：翻译/知识抽取任务、状态、进度、结果、输入/输出 Token、缓存 Token、费用、请求次数。
+- `tasks`：翻译/知识抽取任务、状态、进度、结果、输入/输出 Token、缓存 Token、费用、请求次数、心跳、租约、阶段和检查点。
 - `ai_providers`：服务商名称、类型、基础地址、备注、启用状态。
 - `ai_models`：服务商、模型标识、显示名、上下文、最大输出、超时、能力、默认翻译/问答/知识抽取、每百万 Token 单价、可选 Tokenizer。
 - `ai_usage`：每次 AI 请求的任务、类型、Provider、模型、Token、缓存 Token、费用、耗时、状态、重试次数、估算标记和 Token 来源。
 - `translation_sentence_cache`：逐句翻译缓存，Key 包含原文/上下文 Hash、模型、Prompt 版本和策略版本。
 - `knowledge_chunk_cache`：知识抽取块级缓存，Key 包含章节、块索引、内容 Hash、模型、Prompt 版本和 Schema 版本。
 - `knowledge_extraction_state`：章节级抽取状态，用于内容/模型/Prompt/Schema 未变时跳过 API。
+- `ai_budget_limits`：全局每日/每月、书籍、章节、任务预算上限。
+- `ai_budget_reservations`：任务启动前预留、运行中收缩、结束时释放的预算记录。
 - `prompt_templates`：提示词 key、版本、名称、说明、模板、变量、激活状态。
 - `assistant_sessions` / `assistant_messages`：AI 助手会话与消息、引用、claims。
 - `app_settings`：本地键值设置。
@@ -123,8 +125,8 @@ backup.json
 
 备份模式：
 
-- **完整备份**：数据库完整快照，包含正式数据、`ai_usage`、任务、Prompt 版本、审核记录和缓存。
-- **轻量备份**：生成快照后清空 `translation_sentence_cache`、`knowledge_chunk_cache`、`knowledge_extraction_state` 和 `translation_cache`，保留正式数据、用量、任务和 Prompt 版本。
+- **完整备份**：数据库完整快照，包含正式数据、`ai_usage`、任务、预算、Prompt 版本、审核记录和缓存。
+- **轻量备份**：生成快照后清空 `translation_sentence_cache`、`knowledge_chunk_cache`、`knowledge_extraction_state` 和 `translation_cache`，保留正式数据、用量、任务、预算和 Prompt 版本。
 
 恢复流程：
 
@@ -144,7 +146,8 @@ API Key 仍保存在系统安全存储，不进入备份文件。
 
 - 启动时执行幂等的 `CREATE TABLE IF NOT EXISTS` 与 `CREATE INDEX IF NOT EXISTS`。
 - `AppDatabase._migrate` 通过 `PRAGMA table_info` 检查旧库，按需执行 `ALTER TABLE ADD COLUMN`：
-  - `tasks.input_tokens/output_tokens/cache_read_tokens/cache_write_tokens/cost/requests`
+  - `tasks.input_tokens/output_tokens/cache_read_tokens/cache_write_tokens/cost/requests/estimated_usage`
+  - `tasks.heartbeat_at/lease_owner/stage/checkpoint`
   - `ai_models.input_price/output_price/cache_read_price/cache_write_price/is_default_extraction/tokenizer`
   - `historical_events.fingerprint`
   - `ai_usage.token_source`

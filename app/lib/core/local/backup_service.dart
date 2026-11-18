@@ -70,6 +70,8 @@ class BackupService {
     'assistant_sessions',
     'assistant_messages',
     'app_settings',
+    'ai_budget_limits',
+    'ai_budget_reservations',
     'translation_sentence_cache',
     'knowledge_chunk_cache',
     'knowledge_extraction_state',

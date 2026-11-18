@@ -485,6 +485,10 @@ class TaskInfo {
     this.cost = 0,
     this.requests = 0,
     this.estimatedUsage = 0,
+    this.heartbeatAt,
+    this.leaseOwner,
+    this.stage,
+    this.checkpoint,
   });
 
   final String id;
@@ -506,11 +510,20 @@ class TaskInfo {
   final double cost;
   final int requests;
   final int estimatedUsage;
+  final String? heartbeatAt;
+  final String? leaseOwner;
+  final String? stage;
+  final String? checkpoint;
 
   bool get isActive =>
       status == 'queued' || status == 'running' || status == 'paused';
-  bool get isFinished =>
-      ['completed', 'partial', 'failed', 'cancelled'].contains(status);
+  bool get isFinished => [
+    'completed',
+    'partial',
+    'failed',
+    'cancelled',
+    'interrupted',
+  ].contains(status);
 
   factory TaskInfo.fromJson(Map<String, dynamic> json) => TaskInfo(
     id: json['id'] as String,
@@ -532,6 +545,10 @@ class TaskInfo {
     cost: _double(json['cost']),
     requests: _int(json['requests']),
     estimatedUsage: _int(json['estimated_usage']),
+    heartbeatAt: _str(json['heartbeat_at']),
+    leaseOwner: _str(json['lease_owner']),
+    stage: _str(json['stage']),
+    checkpoint: _str(json['checkpoint']),
   );
 }
 

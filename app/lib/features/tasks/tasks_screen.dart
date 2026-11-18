@@ -161,6 +161,22 @@ class _TasksScreenState extends ConsumerState<TasksScreen> {
                                 }
                               }
                             : null,
+                        onResume: task.status == 'interrupted'
+                            ? () async {
+                                try {
+                                  await ref
+                                      .read(taskRecoveryServiceProvider)
+                                      .resume(task);
+                                  await _refresh();
+                                } catch (error) {
+                                  if (context.mounted) {
+                                    ScaffoldMessenger.of(context).showSnackBar(
+                                      SnackBar(content: Text('恢复失败：$error')),
+                                    );
+                                  }
+                                }
+                              }
+                            : null,
                         onOpen: task.bookId != null && task.chapterId != null
                             ? () => Navigator.of(context).push(
                                 MaterialPageRoute(
@@ -386,9 +402,15 @@ String _formatCost(double value) {
 }
 
 class _TaskCard extends StatelessWidget {
-  const _TaskCard({required this.task, this.onCancel, this.onOpen});
+  const _TaskCard({
+    required this.task,
+    this.onCancel,
+    this.onResume,
+    this.onOpen,
+  });
   final TaskInfo task;
   final VoidCallback? onCancel;
+  final VoidCallback? onResume;
   final VoidCallback? onOpen;
 
   @override
@@ -401,6 +423,7 @@ class _TaskCard extends StatelessWidget {
       'partial' => ('部分完成', theme.colorScheme.tertiary),
       'failed' => ('失败', theme.colorScheme.error),
       'paused' => ('已暂停', theme.colorScheme.tertiary),
+      'interrupted' => ('已中断', theme.colorScheme.error),
       'cancelled' => (
         '已取消',
         theme.colorScheme.onSurface.withValues(alpha: 0.45),
@@ -444,6 +467,8 @@ class _TaskCard extends StatelessWidget {
                               ? Icons.error_outline
                               : task.status == 'paused'
                               ? Icons.pause_circle_outline
+                              : task.status == 'interrupted'
+                              ? Icons.restore_rounded
                               : task.status == 'cancelled'
                               ? Icons.stop_circle_outlined
                               : Icons.check_rounded,
@@ -501,6 +526,20 @@ class _TaskCard extends StatelessWidget {
                           ),
                         ],
                       ),
+                      if (task.stage != null && task.stage!.isNotEmpty) ...[
+                        const SizedBox(height: 3),
+                        Text(
+                          task.stage!,
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: theme.textTheme.labelSmall?.copyWith(
+                            fontSize: 9.5,
+                            color: theme.colorScheme.primary.withValues(
+                              alpha: 0.65,
+                            ),
+                          ),
+                        ),
+                      ],
                     ],
                   ),
                 ),
@@ -531,6 +570,12 @@ class _TaskCard extends StatelessWidget {
                   ),
                 ),
                 const Spacer(),
+                if (onResume != null)
+                  TextButton.icon(
+                    onPressed: onResume,
+                    icon: const Icon(Icons.restore_rounded, size: 14),
+                    label: const Text('恢复', style: TextStyle(fontSize: 11)),
+                  ),
                 if (onOpen != null)
                   TextButton.icon(
                     onPressed: onOpen,

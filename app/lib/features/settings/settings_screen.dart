@@ -321,6 +321,17 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
         ),
         const SizedBox(height: 14),
         _SectionCard(
+          title: '知识抽取模式',
+          subtitle: 'unified 联合抽取；hybrid 在联合结果基础上按需调用专项模型；specialized 使用专项配置。',
+          action: OutlinedButton.icon(
+            onPressed: _editKnowledgeRouting,
+            icon: const Icon(Icons.account_tree_outlined),
+            label: const Text('配置'),
+          ),
+          child: const Text('实体、关系、事件和实体消歧可分别指定模型；未指定时回退到默认知识抽取模型。'),
+        ),
+        const SizedBox(height: 14),
+        _SectionCard(
           title: 'Provider 故障切换',
           subtitle: '仅在超时、429、5xx 等可恢复错误时切换到备用模型；认证、模型不存在等配置错误不会切换。',
           action: OutlinedButton.icon(
@@ -923,6 +934,126 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
     }
   }
 
+  Future<void> _editKnowledgeRouting() async {
+    final ai = ref.read(aiSettingsProvider);
+    final config = await ai.knowledgeRoutingConfig();
+    final models = await ai.models();
+    if (!mounted) return;
+    var mode = config.mode;
+    var entityId = config.entityModelId;
+    var relationId = config.relationModelId;
+    var eventId = config.eventModelId;
+    var disambiguationId = config.disambiguationModelId;
+    final saved = await showDialog<bool>(
+      context: context,
+      builder: (context) => StatefulBuilder(
+        builder: (context, setDialogState) => AlertDialog(
+          title: const Text('知识抽取模式与专项模型'),
+          content: SizedBox(
+            width: 520,
+            child: SingleChildScrollView(
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  DropdownButtonFormField<String>(
+                    initialValue: mode,
+                    decoration: const InputDecoration(labelText: '抽取模式'),
+                    items: const [
+                      DropdownMenuItem(
+                        value: 'unified',
+                        child: Text('unified（联合抽取）'),
+                      ),
+                      DropdownMenuItem(
+                        value: 'hybrid',
+                        child: Text('hybrid（联合 + 疑难专项）'),
+                      ),
+                      DropdownMenuItem(
+                        value: 'specialized',
+                        child: Text('specialized（专项配置）'),
+                      ),
+                    ],
+                    onChanged: (value) =>
+                        setDialogState(() => mode = value ?? mode),
+                  ),
+                  const SizedBox(height: 10),
+                  _modelDropdown(
+                    label: '实体模型',
+                    value: entityId,
+                    models: models,
+                    onChanged: (value) =>
+                        setDialogState(() => entityId = value),
+                  ),
+                  const SizedBox(height: 10),
+                  _modelDropdown(
+                    label: '关系模型',
+                    value: relationId,
+                    models: models,
+                    onChanged: (value) =>
+                        setDialogState(() => relationId = value),
+                  ),
+                  const SizedBox(height: 10),
+                  _modelDropdown(
+                    label: '事件模型',
+                    value: eventId,
+                    models: models,
+                    onChanged: (value) => setDialogState(() => eventId = value),
+                  ),
+                  const SizedBox(height: 10),
+                  _modelDropdown(
+                    label: '实体消歧模型',
+                    value: disambiguationId,
+                    models: models,
+                    onChanged: (value) =>
+                        setDialogState(() => disambiguationId = value),
+                  ),
+                ],
+              ),
+            ),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(context, false),
+              child: const Text('取消'),
+            ),
+            FilledButton(
+              onPressed: () => Navigator.pop(context, true),
+              child: const Text('保存'),
+            ),
+          ],
+        ),
+      ),
+    );
+    if (saved == true) {
+      await ai.saveKnowledgeRoutingConfig(
+        KnowledgeRoutingConfig(
+          mode: mode,
+          entityModelId: entityId,
+          relationModelId: relationId,
+          eventModelId: eventId,
+          disambiguationModelId: disambiguationId,
+        ),
+      );
+      _toast('知识抽取模式已保存');
+    }
+  }
+
+  Widget _modelDropdown({
+    required String label,
+    required String? value,
+    required List<AiModelRecord> models,
+    required ValueChanged<String?> onChanged,
+  }) {
+    return DropdownButtonFormField<String>(
+      initialValue: value,
+      decoration: InputDecoration(labelText: label),
+      items: [
+        for (final model in models)
+          DropdownMenuItem(value: model.id, child: Text(model.displayName)),
+      ],
+      onChanged: onChanged,
+    );
+  }
+
   Future<void> _editFailover() async {
     final ai = ref.read(aiSettingsProvider);
     final config = await ai.failoverConfig();
@@ -1348,9 +1479,12 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
       text: '${model?.cacheWritePrice ?? 0}',
     );
     final tokenizer = TextEditingController(text: model?.tokenizer ?? '');
+    final modelFamily = TextEditingController(text: model?.modelFamily ?? '');
     var selectedProvider = providerId;
     var supportsJson = model?.supportsJson ?? true;
     var promptCaching = model?.promptCaching ?? false;
+    var supportsTools = model?.supportsTools ?? false;
+    var supportsBatch = model?.supportsBatch ?? false;
     var defaultTranslation = model?.isDefaultTranslation ?? false;
     var defaultChat = model?.isDefaultChat ?? false;
     var defaultExtraction = model?.isDefaultExtraction ?? false;
@@ -1400,6 +1534,14 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
                   decoration: const InputDecoration(
                     labelText: 'Tokenizer（可选）',
                     hintText: 'cl100k_base / o200k_base / qwen / deepseek / anthropic',
+                  ),
+                ),
+                const SizedBox(height: 10),
+                TextField(
+                  controller: modelFamily,
+                  decoration: const InputDecoration(
+                    labelText: '模型系列（可选）',
+                    hintText: 'gpt-4 / claude-3 / qwen2 / deepseek',
                   ),
                 ),
                 Padding(
@@ -1525,6 +1667,20 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
                   onChanged: (value) =>
                       setDialogState(() => promptCaching = value),
                 ),
+                SwitchListTile(
+                  contentPadding: EdgeInsets.zero,
+                  title: const Text('支持工具调用'),
+                  value: supportsTools,
+                  onChanged: (value) =>
+                      setDialogState(() => supportsTools = value),
+                ),
+                SwitchListTile(
+                  contentPadding: EdgeInsets.zero,
+                  title: const Text('支持 Batch API'),
+                  value: supportsBatch,
+                  onChanged: (value) =>
+                      setDialogState(() => supportsBatch = value),
+                ),
                 Wrap(
                   spacing: 8,
                   children: [
@@ -1621,6 +1777,13 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
       cacheReadPrice: double.tryParse(cacheReadPrice.text.trim()) ?? 0,
       cacheWritePrice: double.tryParse(cacheWritePrice.text.trim()) ?? 0,
       tokenizer: tokenizer.text.trim().isEmpty ? null : tokenizer.text.trim(),
+      modelFamily: modelFamily.text.trim().isEmpty
+          ? null
+          : modelFamily.text.trim(),
+      supportsTools: supportsTools,
+      supportsBatch: supportsBatch,
+      capabilitySource: 'manual',
+      capabilityUpdatedAt: DateTime.now().toUtc().toIso8601String(),
       capabilities: capabilities,
       supportsJson: supportsJson,
       promptCaching: promptCaching,

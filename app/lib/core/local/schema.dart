@@ -373,6 +373,11 @@ const List<String> schemaStatements = [
     cache_write_price REAL NOT NULL DEFAULT 0,
     tokenizer TEXT,
     prompt_caching INTEGER NOT NULL DEFAULT 0,
+    model_family TEXT,
+    supports_tools INTEGER NOT NULL DEFAULT 0,
+    supports_batch INTEGER NOT NULL DEFAULT 0,
+    capability_source TEXT NOT NULL DEFAULT 'manual',
+    capability_updated_at TEXT,
     enabled INTEGER NOT NULL DEFAULT 1,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
@@ -583,4 +588,23 @@ const List<String> schemaStatements = [
   )
   ''',
   'CREATE INDEX IF NOT EXISTS idx_review_target ON knowledge_review_events(target_type, target_id, created_at DESC)',
+  '''
+  CREATE TABLE IF NOT EXISTS ai_routing_decisions (
+    id TEXT PRIMARY KEY,
+    task_id TEXT,
+    task_type TEXT NOT NULL,
+    requested_model_id TEXT,
+    routed_model_id TEXT,
+    provider_id TEXT,
+    mode TEXT NOT NULL DEFAULT 'unified',
+    reason TEXT,
+    specialized INTEGER NOT NULL DEFAULT 0,
+    trigger_reason TEXT,
+    failover INTEGER NOT NULL DEFAULT 0,
+    original_error TEXT,
+    actual_cost REAL NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL
+  )
+  ''',
+  'CREATE INDEX IF NOT EXISTS idx_routing_task ON ai_routing_decisions(task_id, created_at DESC)',
 ];

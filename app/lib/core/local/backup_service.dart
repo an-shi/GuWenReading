@@ -78,6 +78,7 @@ class BackupService {
     'entity_disambiguations',
     'entity_disambiguation_cache',
     'knowledge_review_events',
+    'ai_routing_decisions',
     'translation_sentence_cache',
     'knowledge_chunk_cache',
     'knowledge_extraction_state',

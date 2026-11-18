@@ -363,6 +363,11 @@ class AppDatabase {
         'cache_write_price': 'REAL NOT NULL DEFAULT 0',
         'tokenizer': 'TEXT',
         'prompt_caching': 'INTEGER NOT NULL DEFAULT 0',
+        'model_family': 'TEXT',
+        'supports_tools': 'INTEGER NOT NULL DEFAULT 0',
+        'supports_batch': 'INTEGER NOT NULL DEFAULT 0',
+        'capability_source': "TEXT NOT NULL DEFAULT 'manual'",
+        'capability_updated_at': 'TEXT',
       },
       'historical_events': {
         'fingerprint': 'TEXT',

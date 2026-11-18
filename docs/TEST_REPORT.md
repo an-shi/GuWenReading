@@ -20,7 +20,7 @@ cd app
 flutter test
 ```
 
-结果：`36 tests passed`
+结果：`37 tests passed`
 
 覆盖：
 
@@ -47,6 +47,8 @@ flutter test
 - Provider 故障切换：可恢复错误切换备用模型，401 等配置错误不切换。
 - Anthropic Prompt Caching：请求包含 `cache_control`，缓存写入 Token 计入费用。
 - 成本分析：缓存节省、成功率、平均耗时、章节/实体/关系/事件平均费用。
+- 关系/事件编辑：新增、修改时间范围、地点、证据增删、审核与审计。
+- 模型能力注册：家族、工具、Batch、Prompt Caching；知识抽取路由决策记录。
 
 ### Android 构建
 
@@ -95,7 +97,7 @@ flutter build windows --debug
 - Windows 端关闭 Flutter 的 MSAA/UIA 无障碍树，规避 Flutter 3.47 引擎在原生文件对话框关闭时 `AccessibilityBridge::CreateRemoveReparentedNodesUpdate` 的崩溃。
 - 书架支持编辑书籍信息与永久删除；使用临时数据库验证删除会清理章节、句子、译文、批注、书签、进度、人物、关系、事件、任务、助手会话、FTS 索引及原始文件。
 - AI 流水线使用本地 Mock OpenAI 兼容服务验证：Token/费用计量、翻译短 ID、逐句/批次缓存、任务去重、联合抽取、长章节分块、失败块重试、事件证据合并、重复抽取跳过、单次预算暂停。
-- 验证方式：`flutter analyze` 无问题，`flutter test` 36 项通过，`flutter build windows --debug` 成功且应用可打开。
+- 验证方式：`flutter analyze` 无问题，`flutter test` 37 项通过，`flutter build windows --debug` 成功且应用可打开。
 
 ## 3. 验证过的核心路径
 
@@ -127,6 +129,7 @@ flutter build windows --debug
 4. 导入文本型 PDF，确认 PDFium 路径。
 5. 导入扫描版 PDF，确认被明确拒绝。
 6. 创建/导出/恢复备份，确认重启后数据一致。
+
 
 
 

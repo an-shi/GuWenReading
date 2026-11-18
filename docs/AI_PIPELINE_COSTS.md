@@ -606,6 +606,14 @@ cache_read_price, cache_write_price
 - 每章平均翻译/抽取成本，每实体/关系/事件平均成本。
 - 质量检查通过率、当前运行/排队/中断任务数。
 
+### 5.7 模型能力与路由决策
+
+- 模型能力字段：`model_family`、Tokenizer、Prompt Caching、工具调用、Batch、视觉、价格、能力来源和更新时间。
+- 知识抽取支持 `unified / specialized / hybrid` 配置，实体、关系、事件、实体消歧可分别指定模型。
+- 实体消歧已实际使用 `disambiguation_model_id`；未配置时回退知识抽取模型。
+- 每次知识抽取和实体消歧写入 `ai_routing_decisions`：原模型、实际模型、模式、触发原因、费用。
+- 专项抽取仍以联合结果为前提，不无条件重复发送整章原文。
+
 ## 6. 测试与实测
 
 自动化测试：

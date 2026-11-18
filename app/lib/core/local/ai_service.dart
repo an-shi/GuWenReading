@@ -13,6 +13,39 @@ import 'ai_scheduler.dart';
 import 'prompt_defaults.dart';
 import 'tokenizer_adapter.dart';
 
+class KnowledgeRoutingConfig {
+  const KnowledgeRoutingConfig({
+    this.mode = 'unified',
+    this.entityModelId,
+    this.relationModelId,
+    this.eventModelId,
+    this.disambiguationModelId,
+  });
+
+  final String mode;
+  final String? entityModelId;
+  final String? relationModelId;
+  final String? eventModelId;
+  final String? disambiguationModelId;
+
+  Map<String, Object?> toJson() => {
+    'mode': mode,
+    'entity_model_id': entityModelId,
+    'relation_model_id': relationModelId,
+    'event_model_id': eventModelId,
+    'disambiguation_model_id': disambiguationModelId,
+  };
+
+  factory KnowledgeRoutingConfig.fromJson(Map<String, dynamic> json) =>
+      KnowledgeRoutingConfig(
+        mode: json['mode'] as String? ?? 'unified',
+        entityModelId: json['entity_model_id'] as String?,
+        relationModelId: json['relation_model_id'] as String?,
+        eventModelId: json['event_model_id'] as String?,
+        disambiguationModelId: json['disambiguation_model_id'] as String?,
+      );
+}
+
 class AiFailoverConfig {
   const AiFailoverConfig({
     this.enabled = false,
@@ -750,6 +783,24 @@ class AiSettingsService {
     await store.setSetting('ai_failover', jsonEncode(config.toJson()));
   }
 
+  Future<KnowledgeRoutingConfig> knowledgeRoutingConfig() async {
+    final raw = await store.getSetting('ai_knowledge_routing');
+    if (raw == null || raw.trim().isEmpty) {
+      return const KnowledgeRoutingConfig();
+    }
+    try {
+      return KnowledgeRoutingConfig.fromJson(
+        jsonDecode(raw) as Map<String, dynamic>,
+      );
+    } catch (_) {
+      return const KnowledgeRoutingConfig();
+    }
+  }
+
+  Future<void> saveKnowledgeRoutingConfig(KnowledgeRoutingConfig config) async {
+    await store.setSetting('ai_knowledge_routing', jsonEncode(config.toJson()));
+  }
+
   /// Returns a fallback model different from [primary].
   Future<ResolvedAiModel?> failoverFallback(ResolvedAiModel primary) async {
     final config = await failoverConfig();
@@ -1066,8 +1117,11 @@ class AiJsonClient {
     Future<bool> Function()? shouldCancel,
     int? promptVersion,
     int? schemaVersion,
+    String? modelId,
   }) async {
-    final resolved = await settings.resolve(purpose: purpose);
+    final resolved = modelId == null
+        ? await settings.resolve(purpose: purpose)
+        : await settings.resolveModelById(modelId);
     if (resolved == null) throw AiNotConfiguredException();
     Future<String> run(ResolvedAiModel model, {String? from, String? reason}) {
       return AiScheduler.instance.run(
@@ -1246,6 +1300,7 @@ class AiJsonClient {
     Future<bool> Function()? shouldCancel,
     int? promptVersion,
     int? schemaVersion,
+    String? modelId,
   }) async {
     final text = await chat(
       purpose: purpose,
@@ -1258,6 +1313,7 @@ class AiJsonClient {
       shouldCancel: shouldCancel,
       promptVersion: promptVersion,
       schemaVersion: schemaVersion,
+      modelId: modelId,
     );
     return parseJsonObject(text);
   }

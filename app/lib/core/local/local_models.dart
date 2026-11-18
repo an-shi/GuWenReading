@@ -51,6 +51,11 @@ class AiModelRecord {
     this.cacheWritePrice = 0,
     this.tokenizer,
     this.promptCaching = false,
+    this.modelFamily,
+    this.supportsTools = false,
+    this.supportsBatch = false,
+    this.capabilitySource = 'manual',
+    this.capabilityUpdatedAt,
     this.enabled = true,
   });
 
@@ -79,6 +84,11 @@ class AiModelRecord {
   /// the model-name heuristic.
   final String? tokenizer;
   final bool promptCaching;
+  final String? modelFamily;
+  final bool supportsTools;
+  final bool supportsBatch;
+  final String capabilitySource;
+  final String? capabilityUpdatedAt;
   final bool enabled;
 
   bool supports(String capability) => capabilities.contains(capability);
@@ -102,6 +112,11 @@ class AiModelRecord {
     cacheWritePrice: (row['cache_write_price'] as num? ?? 0).toDouble(),
     tokenizer: row['tokenizer'] as String?,
     promptCaching: (row['prompt_caching'] as int? ?? 0) == 1,
+    modelFamily: row['model_family'] as String?,
+    supportsTools: (row['supports_tools'] as int? ?? 0) == 1,
+    supportsBatch: (row['supports_batch'] as int? ?? 0) == 1,
+    capabilitySource: row['capability_source'] as String? ?? 'manual',
+    capabilityUpdatedAt: row['capability_updated_at'] as String?,
     enabled: (row['enabled'] as int? ?? 1) == 1,
   );
 }

@@ -72,6 +72,13 @@
 - `entity_disambiguation_cache`：按候选集合、模型、Prompt、Schema 版本缓存消歧结果。
 - `knowledge_review_events`：人工审核、修改、合并、拆分和撤销审计。
 - `prompt_schemas`：输出 JSON Schema 的版本与启用状态。
+- `ai_routing_decisions`：任务类型、原始/实际模型、路由模式、专项触发原因、故障切换与费用。
+
+关系/事件编辑字段：
+
+- `entity_relations.valid_from_raw/valid_from_year/valid_to_raw/valid_to_year/time_precision/source_kind/updated_by`
+- `historical_events.time_end_raw/location/source_kind/updated_by`
+- `relation_sources/event_sources.paragraph_id/evidence_type/source_kind/note/review_status/created_at`
 - `prompt_templates`：提示词 key、版本、名称、说明、模板、变量、激活状态。
 - `assistant_sessions` / `assistant_messages`：AI 助手会话与消息、引用、claims。
 - `app_settings`：本地键值设置。

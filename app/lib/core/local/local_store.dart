@@ -1091,6 +1091,51 @@ class LocalStore {
     return rows.isEmpty ? null : _taskFromRow(rows.first);
   }
 
+  Future<void> recordRoutingDecision({
+    String? taskId,
+    required String taskType,
+    String? requestedModelId,
+    String? routedModelId,
+    String? providerId,
+    String mode = 'unified',
+    String? reason,
+    bool specialized = false,
+    String? triggerReason,
+    bool failover = false,
+    String? originalError,
+    double actualCost = 0,
+  }) async {
+    await db.insert('ai_routing_decisions', {
+      'id': newLocalId('route'),
+      'task_id': taskId,
+      'task_type': taskType,
+      'requested_model_id': requestedModelId,
+      'routed_model_id': routedModelId,
+      'provider_id': providerId,
+      'mode': mode,
+      'reason': reason,
+      'specialized': specialized ? 1 : 0,
+      'trigger_reason': triggerReason,
+      'failover': failover ? 1 : 0,
+      'original_error': originalError,
+      'actual_cost': actualCost,
+      'created_at': nowIso(),
+    });
+  }
+
+  Future<List<Map<String, Object?>>> routingDecisions({
+    String? taskId,
+    int limit = 200,
+  }) async {
+    return db.query(
+      'ai_routing_decisions',
+      where: taskId == null ? null : 'task_id = ?',
+      whereArgs: taskId == null ? null : [taskId],
+      orderBy: 'created_at DESC',
+      limit: limit,
+    );
+  }
+
   Future<void> recordQualityReport({
     String? taskId,
     required String scope,
@@ -1620,6 +1665,11 @@ class LocalStore {
         'cache_write_price': model.cacheWritePrice,
         'tokenizer': model.tokenizer,
         'prompt_caching': model.promptCaching ? 1 : 0,
+        'model_family': model.modelFamily,
+        'supports_tools': model.supportsTools ? 1 : 0,
+        'supports_batch': model.supportsBatch ? 1 : 0,
+        'capability_source': model.capabilitySource,
+        'capability_updated_at': model.capabilityUpdatedAt ?? nowIso(),
         'enabled': model.enabled ? 1 : 0,
         'created_at': now,
         'updated_at': now,

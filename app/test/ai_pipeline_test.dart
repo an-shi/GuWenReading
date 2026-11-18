@@ -278,6 +278,11 @@ void main() {
       final quality = await store.qualityReports();
       expect(quality.any((row) => row['scope'] == 'translation_batch'), isTrue);
       expect(quality.any((row) => row['scope'] == 'knowledge_chunk'), isTrue);
+      final routes = await store.routingDecisions();
+      expect(
+        routes.any((row) => row['task_type'] == 'knowledge_extraction'),
+        isTrue,
+      );
 
       final requestsBeforeRepeat = knowledgeRequests;
       final repeatedTask = await knowledge.startExtraction(chapter.id);

@@ -133,6 +133,15 @@ class KnowledgeService {
       _extractionPromptKey,
     );
     final schemaVersion = await store.activeSchemaVersion(_extractionPromptKey);
+    final routing = await aiSettings.knowledgeRoutingConfig();
+    await store.recordRoutingDecision(
+      taskId: taskId,
+      taskType: 'knowledge_extraction',
+      routedModelId: resolved.model.id,
+      providerId: resolved.provider.id,
+      mode: routing.mode,
+      reason: '联合抽取使用知识抽取默认模型',
+    );
     final chunks = _buildChunks(content, resolved.model);
     if (chunks.isEmpty) {
       await store.updateTask(
@@ -369,6 +378,7 @@ class KnowledgeService {
     required String taskId,
   }) async {
     final decisions = <int, _EntityDecision>{};
+    final routing = await aiSettings.knowledgeRoutingConfig();
     final sentenceByIndex = <int, Sentence>{
       for (var i = 0; i < chunk.sentences.length; i++)
         i + 1: chunk.sentences[i],
@@ -455,6 +465,17 @@ class KnowledgeService {
             'quote': _truncateText(quote ?? '', 300),
             'candidates_json': jsonEncode(candidatesJson),
           });
+          await store.recordRoutingDecision(
+            taskId: taskId,
+            taskType: 'entity_disambiguation',
+            requestedModelId: resolved.model.id,
+            routedModelId: routing.disambiguationModelId ?? resolved.model.id,
+            providerId: resolved.provider.id,
+            mode: routing.mode,
+            reason: '多候选实体冲突',
+            specialized: routing.disambiguationModelId != null,
+            triggerReason: '本地匹配出现多个高分候选',
+          );
           result = await client.chatJson(
             purpose: 'extraction',
             prompt: prompt,
@@ -463,6 +484,7 @@ class KnowledgeService {
             taskType: 'entity_disambiguation',
             promptVersion: promptVersion,
             schemaVersion: schemaVersion,
+            modelId: routing.disambiguationModelId,
             shouldCancel: () async {
               final current = await store.getTask(taskId);
               return current == null ||

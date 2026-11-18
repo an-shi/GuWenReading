@@ -12,6 +12,7 @@ import 'app_database.dart';
 import 'budget_service.dart';
 import 'local_models.dart';
 import 'local_store.dart';
+import 'quality_service.dart';
 import 'tokenizer_adapter.dart';
 
 class KnowledgeService {
@@ -20,14 +21,17 @@ class KnowledgeService {
     required this.aiSettings,
     required this.client,
     BudgetService? budgets,
-  }) : budgets = budgets ?? BudgetService(store: store);
+    QualityService? quality,
+  }) : budgets = budgets ?? BudgetService(store: store),
+       quality = quality ?? const QualityService();
 
   final LocalStore store;
   final AiSettingsService aiSettings;
   final AiJsonClient client;
   final BudgetService budgets;
+  final QualityService quality;
 
-  static const _schemaVersion = 2;
+  static const _extractionPromptKey = 'knowledge_extract';
 
   Future<TaskInfo> startExtraction(String chapterId) async {
     final active = await store.activeTask(
@@ -126,8 +130,9 @@ class KnowledgeService {
       return;
     }
     final promptVersion = await aiSettings.activePromptVersion(
-      'knowledge_extract',
+      _extractionPromptKey,
     );
+    final schemaVersion = await store.activeSchemaVersion(_extractionPromptKey);
     final chunks = _buildChunks(content, resolved.model);
     if (chunks.isEmpty) {
       await store.updateTask(
@@ -147,7 +152,7 @@ class KnowledgeService {
         cachedState['content_hash'] == chapterHash &&
         cachedState['model_label'] == resolved.label &&
         cachedState['prompt_version'] == promptVersion &&
-        cachedState['schema_version'] == _schemaVersion) {
+        cachedState['schema_version'] == schemaVersion) {
       await store.updateTask(
         taskId,
         status: 'completed',
@@ -178,6 +183,10 @@ class KnowledgeService {
     var matchedRelations = 0;
     var createdEvents = 0;
     var matchedEvents = 0;
+    var qualityWarnings = 0;
+    var qualityReviews = 0;
+    var disambiguated = 0;
+    var pendingReviews = 0;
     for (var index = 0; index < chunks.length; index++) {
       final currentTask = await store.getTask(taskId);
       if (currentTask == null ||
@@ -193,7 +202,7 @@ class KnowledgeService {
           contentHash: chunk.contentHash,
           modelLabel: resolved.label,
           promptVersion: promptVersion,
-          schemaVersion: _schemaVersion,
+          schemaVersion: schemaVersion,
         );
         Map<String, dynamic> data;
         if (cachedJson != null) {
@@ -215,6 +224,8 @@ class KnowledgeService {
             temperature: 0.1,
             taskId: taskId,
             taskType: 'knowledge_extraction',
+            promptVersion: promptVersion,
+            schemaVersion: schemaVersion,
             shouldCancel: () async {
               final current = await store.getTask(taskId);
               return current == null ||
@@ -228,11 +239,54 @@ class KnowledgeService {
             contentHash: chunk.contentHash,
             modelLabel: resolved.label,
             promptVersion: promptVersion,
-            schemaVersion: _schemaVersion,
+            schemaVersion: schemaVersion,
             resultJson: jsonEncode(data),
           );
         }
-        final stats = await _applyChunk(content, chunk, data);
+        final report = quality.checkKnowledge(data);
+        await store.recordQualityReport(
+          taskId: taskId,
+          scope: 'knowledge_chunk',
+          reference: 'chunk:${chunk.index}',
+          status: report.level.wireValue,
+          issues: report.issues.map((issue) => issue.toJson()).toList(),
+        );
+        if (report.level == QualityLevel.failed ||
+            report.level == QualityLevel.needsReview) {
+          qualityReviews += 1;
+        } else if (report.level == QualityLevel.warning) {
+          qualityWarnings += 1;
+        }
+        final decisions = await _resolveEntityDecisions(
+          chunk: chunk,
+          data: data,
+          resolved: resolved,
+          taskId: taskId,
+        );
+        disambiguated += decisions.values
+            .where((decision) => decision.record)
+            .length;
+        pendingReviews += decisions.values
+            .where(
+              (decision) =>
+                  decision.status == 'pending_review' ||
+                  decision.status == 'unresolved',
+            )
+            .length;
+        final stats = await _applyChunk(
+          content,
+          chunk,
+          data,
+          _ExtractionContext(
+            taskId: taskId,
+            providerId: resolved.provider.id,
+            modelId: resolved.model.id,
+            promptVersion: promptVersion,
+            schemaVersion: schemaVersion,
+            chunkIndex: chunk.index,
+          ),
+          decisions: decisions,
+        );
         createdEntities += stats.createdEntities;
         matchedEntities += stats.matchedEntities;
         createdRelations += stats.createdRelations;
@@ -270,7 +324,7 @@ class KnowledgeService {
       contentHash: chapterHash,
       modelLabel: resolved.label,
       promptVersion: promptVersion,
-      schemaVersion: _schemaVersion,
+      schemaVersion: schemaVersion,
       status: status == 'completed' ? 'completed' : 'partial',
     );
     await store.updateTask(
@@ -288,6 +342,10 @@ class KnowledgeService {
         'events_matched': matchedEvents,
         'cached_chunks': cachedChunks,
         'chunks': chunks.length,
+        'quality_warnings': qualityWarnings,
+        'quality_reviews': qualityReviews,
+        'disambiguated': disambiguated,
+        'pending_review': pendingReviews,
         'model': resolved.label,
       },
     );
@@ -303,6 +361,237 @@ class KnowledgeService {
     );
     return true;
   }
+
+  Future<Map<int, _EntityDecision>> _resolveEntityDecisions({
+    required _KnowledgeChunk chunk,
+    required Map<String, dynamic> data,
+    required ResolvedAiModel resolved,
+    required String taskId,
+  }) async {
+    final decisions = <int, _EntityDecision>{};
+    final sentenceByIndex = <int, Sentence>{
+      for (var i = 0; i < chunk.sentences.length; i++)
+        i + 1: chunk.sentences[i],
+    };
+    for (final item in jsonList(data['entities'])) {
+      final localId = jsonInt(item['id']);
+      final name = jsonString(item['name']);
+      if (localId == null || name == null || name.trim().isEmpty) continue;
+      final kind = _normalizeEntityKind(jsonString(item['type']) ?? 'other');
+      final dynasty = jsonString(item['dynasty']);
+      final aliases = _jsonStringList(item['aliases']);
+      final candidates = await _entityCandidates(
+        name: name,
+        aliases: aliases,
+        kind: kind,
+      );
+      if (candidates.isEmpty) continue;
+      final top = candidates.first;
+      if (top.score >= 0.9) {
+        final ambiguous = candidates.length > 1 && candidates[1].score >= 0.88;
+        if (!ambiguous) {
+          decisions[localId] = _EntityDecision(
+            entityId: top.id,
+            isNew: false,
+            status: 'auto_matched',
+            confidence: top.score,
+            reason: '本地名称/别名匹配',
+            candidates: candidates,
+            name: name,
+            kind: kind,
+            dynasty: dynasty,
+            record: false,
+          );
+          continue;
+        }
+      }
+      final quoteSentences = _evidenceSentences(
+        item['evidence'],
+        sentenceByIndex,
+      );
+      final quote = quoteSentences.isEmpty
+          ? null
+          : quoteSentences.first.originalText;
+      final promptVersion = await aiSettings.activePromptVersion(
+        'entity_disambiguation',
+      );
+      final schemaVersion = await store.activeSchemaVersion(
+        'entity_disambiguation',
+      );
+      final candidateKey = candidates.map((item) => item.id).join(',');
+      final cacheKey = sha256
+          .convert(
+            utf8.encode(
+              '${name.trim()}|$kind|${dynasty ?? ''}|$candidateKey|'
+              '${resolved.label}|v$promptVersion|s$schemaVersion',
+            ),
+          )
+          .toString();
+      Map<String, dynamic>? result;
+      final cached = await store.entityDisambiguationCache(cacheKey);
+      if (cached != null) {
+        try {
+          result = jsonDecode(cached) as Map<String, dynamic>;
+        } catch (_) {
+          result = null;
+        }
+      }
+      if (result == null) {
+        try {
+          final candidatesJson = [
+            for (var i = 0; i < candidates.length; i++)
+              {
+                'id': i + 1,
+                'name': candidates[i].name,
+                'kind': candidates[i].kind,
+                'dynasty': candidates[i].dynasty,
+                'status': candidates[i].status,
+              },
+          ];
+          final prompt = await aiSettings.render('entity_disambiguation', {
+            'name': name,
+            'kind': kind,
+            'dynasty': dynasty ?? '未知',
+            'quote': _truncateText(quote ?? '', 300),
+            'candidates_json': jsonEncode(candidatesJson),
+          });
+          result = await client.chatJson(
+            purpose: 'extraction',
+            prompt: prompt,
+            temperature: 0,
+            taskId: taskId,
+            taskType: 'entity_disambiguation',
+            promptVersion: promptVersion,
+            schemaVersion: schemaVersion,
+            shouldCancel: () async {
+              final current = await store.getTask(taskId);
+              return current == null ||
+                  current.status == 'cancelled' ||
+                  current.status == 'paused';
+            },
+          );
+          await store.putEntityDisambiguationCache(
+            cacheKey: cacheKey,
+            resultJson: jsonEncode(result),
+          );
+        } catch (_) {
+          // Disambiguation failure must not lose the extracted entity.
+          result = null;
+        }
+      }
+      final chosenIndex = jsonInt(result?['entity']);
+      final confidence =
+          (result?['confidence'] is num
+                  ? (result!['confidence'] as num).toDouble()
+                  : 0.0)
+              .clamp(0.0, 1.0);
+      final reason = jsonString(result?['reason']);
+      final chosen =
+          chosenIndex != null &&
+              chosenIndex >= 1 &&
+              chosenIndex <= candidates.length
+          ? candidates[chosenIndex - 1]
+          : null;
+      if (chosen != null && confidence >= 0.8) {
+        decisions[localId] = _EntityDecision(
+          entityId: chosen.id,
+          isNew: false,
+          status: 'auto_matched',
+          confidence: confidence,
+          reason: reason,
+          candidates: candidates,
+          name: name,
+          kind: kind,
+          dynasty: dynasty,
+          record: true,
+        );
+      } else {
+        decisions[localId] = _EntityDecision(
+          entityId: newLocalId('ent'),
+          isNew: true,
+          status: chosen != null ? 'pending_review' : 'unresolved',
+          confidence: confidence,
+          reason: reason ?? '无法可靠匹配候选',
+          candidates: candidates,
+          name: name,
+          kind: kind,
+          dynasty: dynasty,
+          record: true,
+        );
+      }
+    }
+    return decisions;
+  }
+
+  Future<List<_EntityCandidate>> _entityCandidates({
+    required String name,
+    required List<String> aliases,
+    required String kind,
+  }) async {
+    final normalizedName = _normalizeEntityName(name);
+    final rows = await store.db.query(
+      'entities',
+      where:
+          "canonical_name = ? OR canonical_name LIKE ? OR aliases LIKE ? "
+          "OR (? <> '' AND aliases LIKE ?)",
+      whereArgs: [
+        name,
+        '%$normalizedName%',
+        '%$name%',
+        aliases.isEmpty ? '' : aliases.first,
+        aliases.isEmpty ? '' : '%${aliases.first}%',
+      ],
+      limit: 40,
+    );
+    final candidates = <_EntityCandidate>[];
+    for (final row in rows) {
+      final canonical = row['canonical_name'] as String? ?? '';
+      final values = _decodeStringList(row['aliases']);
+      final rowKind = row['kind'] as String? ?? 'other';
+      var score = 0.0;
+      if (canonical == name) {
+        score = 1.0;
+      } else if (values.contains(name)) {
+        score = 0.96;
+      } else if (_normalizeEntityName(canonical) == normalizedName) {
+        score = 0.92;
+      } else if (aliases.any(values.contains)) {
+        score = 0.9;
+      } else if (rowKind == kind &&
+          normalizedName.length >= 2 &&
+          (_normalizeEntityName(canonical).contains(normalizedName) ||
+              normalizedName.contains(_normalizeEntityName(canonical)))) {
+        score = 0.6;
+      } else if (rowKind == kind &&
+          aliases.any(
+            (alias) =>
+                alias.length >= 2 &&
+                _normalizeEntityName(canonical)
+                    .contains(_normalizeEntityName(alias)),
+          )) {
+        score = 0.55;
+      }
+      if (score <= 0) continue;
+      candidates.add(
+        _EntityCandidate(
+          id: row['id'] as String,
+          name: canonical,
+          kind: rowKind,
+          dynasty: row['dynasty'] as String?,
+          status: row['status'] as String? ?? 'pending',
+          score: score,
+        ),
+      );
+    }
+    candidates.sort((a, b) => b.score.compareTo(a.score));
+    return candidates.take(5).toList();
+  }
+
+  String _normalizeEntityName(String value) =>
+      value.replaceAll(RegExp(r'[\s·・（）()\[\]【】]'), '').trim();
+
+  String _truncateText(String value, int maxLength) =>
+      value.length <= maxLength ? value : value.substring(0, maxLength);
 
   List<_KnowledgeChunk> _buildChunks(
     ChapterContent content,
@@ -394,7 +683,9 @@ class KnowledgeService {
     ChapterContent content,
     _KnowledgeChunk chunk,
     Map<String, dynamic> data,
-  ) async {
+    _ExtractionContext context, {
+    Map<int, _EntityDecision> decisions = const {},
+  }) async {
     final sentenceByIndex = <int, Sentence>{
       for (var i = 0; i < chunk.sentences.length; i++)
         i + 1: chunk.sentences[i],
@@ -416,55 +707,131 @@ class KnowledgeService {
         final aliases = _jsonStringList(item['aliases']);
         final kind = _normalizeEntityKind(jsonString(item['type']) ?? 'other');
         final dynasty = jsonString(item['dynasty']);
-        final existing = await _findEntityRecord(txn, name, aliases);
+        final entityEvidence = _evidenceSentences(
+          item['evidence'],
+          sentenceByIndex,
+        );
         final now = nowIso();
+        final decision = decisions[localId];
         String entityId;
-        if (existing == null) {
-          entityId = newLocalId('ent');
-          await txn.insert('entities', {
-            'id': entityId,
-            'canonical_name': name,
+        if (decision != null) {
+          entityId = decision.entityId;
+          if (decision.isNew) {
+            await txn.insert('entities', {
+              'id': entityId,
+              'canonical_name': name,
+              'kind': kind,
+              'aliases': jsonEncode(aliases),
+              'dynasty': dynasty,
+              'status': 'pending',
+              'knowledge_type': entityEvidence.isEmpty
+                  ? 'inferred'
+                  : 'explicit',
+              'created_at': now,
+              'updated_at': now,
+            });
+            createdEntities += 1;
+          } else {
+            matchedEntities += 1;
+            final existing = await txn.query(
+              'entities',
+              where: 'id = ?',
+              whereArgs: [entityId],
+              limit: 1,
+            );
+            if (existing.isNotEmpty) {
+              final mergedAliases = {
+                ..._decodeStringList(existing.first['aliases']),
+                ...aliases,
+              }..remove(name);
+              final updates = <String, Object?>{'updated_at': now};
+              if (mergedAliases.isNotEmpty) {
+                updates['aliases'] = jsonEncode(mergedAliases.toList());
+              }
+              if ((existing.first['dynasty'] as String?) == null &&
+                  dynasty != null) {
+                updates['dynasty'] = dynasty;
+              }
+              await txn.update(
+                'entities',
+                updates,
+                where: 'id = ?',
+                whereArgs: [entityId],
+              );
+            }
+          }
+          await txn.insert('entity_disambiguations', {
+            'id': newLocalId('disamb'),
+            'task_id': context.taskId,
+            'extracted_name': name,
             'kind': kind,
-            'aliases': jsonEncode(aliases),
             'dynasty': dynasty,
-            'status': 'pending',
+            'candidate_ids': jsonEncode(
+              decision.candidates.map((candidate) => candidate.id).toList(),
+            ),
+            'chosen_entity_id': decision.isNew ? null : entityId,
+            'status': decision.status,
+            'confidence': decision.confidence,
+            'reason': decision.reason,
+            'model_id': context.modelId,
             'created_at': now,
-            'updated_at': now,
           });
-          createdEntities += 1;
         } else {
-          entityId = existing['id'] as String;
-          matchedEntities += 1;
-          final mergedAliases = {
-            ..._decodeStringList(existing['aliases']),
-            ...aliases,
-          }..remove(name);
-          final updates = <String, Object?>{'updated_at': now};
-          if (mergedAliases.isNotEmpty) {
-            updates['aliases'] = jsonEncode(mergedAliases.toList());
+          final existing = await _findEntityRecord(txn, name, aliases);
+          if (existing == null) {
+            entityId = newLocalId('ent');
+            await txn.insert('entities', {
+              'id': entityId,
+              'canonical_name': name,
+              'kind': kind,
+              'aliases': jsonEncode(aliases),
+              'dynasty': dynasty,
+              'status': 'pending',
+              'knowledge_type': entityEvidence.isEmpty
+                  ? 'inferred'
+                  : 'explicit',
+              'created_at': now,
+              'updated_at': now,
+            });
+            createdEntities += 1;
+          } else {
+            entityId = existing['id'] as String;
+            matchedEntities += 1;
+            final mergedAliases = {
+              ..._decodeStringList(existing['aliases']),
+              ...aliases,
+            }..remove(name);
+            final updates = <String, Object?>{'updated_at': now};
+            if (mergedAliases.isNotEmpty) {
+              updates['aliases'] = jsonEncode(mergedAliases.toList());
+            }
+            if ((existing['dynasty'] as String?) == null && dynasty != null) {
+              updates['dynasty'] = dynasty;
+            }
+            final knowledgeType = existing['knowledge_type'] as String?;
+            if (knowledgeType != 'human_verified' &&
+                entityEvidence.isNotEmpty &&
+                knowledgeType != 'explicit') {
+              updates['knowledge_type'] = 'explicit';
+            }
+            await txn.update(
+              'entities',
+              updates,
+              where: 'id = ?',
+              whereArgs: [entityId],
+            );
           }
-          if ((existing['dynasty'] as String?) == null && dynasty != null) {
-            updates['dynasty'] = dynasty;
-          }
-          await txn.update(
-            'entities',
-            updates,
-            where: 'id = ?',
-            whereArgs: [entityId],
-          );
         }
         entityIds[localId] = entityId;
         entityNames[entityId] = name;
-        for (final sentence in _evidenceSentences(
-          item['evidence'],
-          sentenceByIndex,
-        )) {
+        for (final sentence in entityEvidence) {
           await _insertMentionIfMissing(
             txn,
             entityId: entityId,
             content: content,
             sentence: sentence,
             quote: sentence.originalText,
+            context: context,
           );
         }
       }
@@ -495,6 +862,7 @@ class KnowledgeService {
             'label': type,
             'description': null,
             'status': 'inferred',
+            'knowledge_type': 'inferred',
             'confidence': 0.65,
             'created_at': now,
             'updated_at': now,
@@ -511,6 +879,19 @@ class KnowledgeService {
             content: content,
             sentence: sentence,
             quote: sentence.originalText,
+            context: context,
+          );
+        }
+        final sourceCount = await txn.rawQuery(
+          'SELECT COUNT(DISTINCT book_id) AS n FROM relation_sources '
+          'WHERE relation_id = ? AND book_id IS NOT NULL',
+          [relationId],
+        );
+        if ((sourceCount.first['n'] as int? ?? 0) >= 2) {
+          await txn.rawUpdate(
+            "UPDATE entity_relations SET knowledge_type = 'cross_source_supported' "
+            "WHERE id = ? AND knowledge_type <> 'human_verified'",
+            [relationId],
           );
         }
       }
@@ -569,6 +950,7 @@ class KnowledgeService {
             'time_precision': precision,
             'time_note': null,
             'status': 'extracted',
+            'knowledge_type': 'inferred',
             'fingerprint': fingerprint,
             'created_at': now,
             'updated_at': now,
@@ -632,6 +1014,19 @@ class KnowledgeService {
             content: content,
             sentence: sentence,
             quote: sentence.originalText,
+            context: context,
+          );
+        }
+        final sourceCount = await txn.rawQuery(
+          'SELECT COUNT(DISTINCT book_id) AS n FROM event_sources '
+          'WHERE event_id = ? AND book_id IS NOT NULL',
+          [eventId],
+        );
+        if ((sourceCount.first['n'] as int? ?? 0) >= 2) {
+          await txn.rawUpdate(
+            "UPDATE historical_events SET knowledge_type = 'cross_source_supported' "
+            "WHERE id = ? AND knowledge_type <> 'human_verified'",
+            [eventId],
           );
         }
       }
@@ -709,6 +1104,7 @@ class KnowledgeService {
     required ChapterContent content,
     required Sentence sentence,
     required String quote,
+    required _ExtractionContext context,
   }) async {
     final existing = await txn.query(
       'entity_mentions',
@@ -725,6 +1121,13 @@ class KnowledgeService {
       'sentence_id': sentence.id,
       'quote': quote,
       'status': 'pending',
+      'chunk_index': context.chunkIndex,
+      'task_id': context.taskId,
+      'provider_id': context.providerId,
+      'model_id': context.modelId,
+      'prompt_version': context.promptVersion,
+      'schema_version': context.schemaVersion,
+      'extracted_at': nowIso(),
       'created_at': nowIso(),
     });
   }
@@ -735,6 +1138,7 @@ class KnowledgeService {
     required ChapterContent content,
     required Sentence sentence,
     required String quote,
+    required _ExtractionContext context,
   }) async {
     final existing = await txn.query(
       'relation_sources',
@@ -751,6 +1155,13 @@ class KnowledgeService {
       'book_id': content.bookId,
       'chapter_id': content.chapterId,
       'quote': quote,
+      'chunk_index': context.chunkIndex,
+      'task_id': context.taskId,
+      'provider_id': context.providerId,
+      'model_id': context.modelId,
+      'prompt_version': context.promptVersion,
+      'schema_version': context.schemaVersion,
+      'extracted_at': nowIso(),
     });
   }
 
@@ -760,6 +1171,7 @@ class KnowledgeService {
     required ChapterContent content,
     required Sentence sentence,
     required String quote,
+    required _ExtractionContext context,
   }) async {
     final existing = await txn.query(
       'event_sources',
@@ -775,6 +1187,13 @@ class KnowledgeService {
       'book_id': content.bookId,
       'chapter_id': content.chapterId,
       'quote': quote,
+      'chunk_index': context.chunkIndex,
+      'task_id': context.taskId,
+      'provider_id': context.providerId,
+      'model_id': context.modelId,
+      'prompt_version': context.promptVersion,
+      'schema_version': context.schemaVersion,
+      'extracted_at': nowIso(),
     });
   }
 
@@ -894,6 +1313,7 @@ class KnowledgeService {
           summary: row['summary'] as String?,
           aliases: _decodeStringList(row['aliases']),
           status: row['status'] as String? ?? 'pending',
+          knowledgeType: row['knowledge_type'] as String? ?? 'explicit',
         ),
     ];
   }
@@ -941,6 +1361,7 @@ class KnowledgeService {
           otherId: relation['other_entity_id'] as String?,
           description: relation['description'] as String?,
           status: relation['status'] as String? ?? 'inferred',
+          knowledgeType: relation['knowledge_type'] as String? ?? 'inferred',
           sources: [
             for (final source in sources)
               RelationSource(
@@ -961,6 +1382,7 @@ class KnowledgeService {
       summary: row['summary'] as String?,
       aliases: _decodeStringList(row['aliases']),
       status: row['status'] as String? ?? 'pending',
+      knowledgeType: row['knowledge_type'] as String? ?? 'explicit',
       mentions: [
         for (final mention in mentionRows)
           EntityMention(
@@ -977,76 +1399,461 @@ class KnowledgeService {
     );
   }
 
-  Future<void> setEntityStatus(String id, String status) async {
-    await store.db.update(
-      'entities',
-      {'status': status, 'updated_at': nowIso()},
-      where: 'id = ?',
-      whereArgs: [id],
-    );
-  }
+  Future<void> setEntityStatus(String id, String status) => _setReviewStatus(
+    table: 'entities',
+    targetType: 'entity',
+    id: id,
+    status: status,
+    knowledgeType: status == 'confirmed'
+        ? 'human_verified'
+        : status == 'rejected'
+        ? 'disputed'
+        : null,
+  );
 
-  Future<void> setRelationStatus(String id, String status) async {
-    await store.db.update(
-      'entity_relations',
-      {'status': status, 'updated_at': nowIso()},
-      where: 'id = ?',
-      whereArgs: [id],
-    );
-  }
+  Future<void> setRelationStatus(String id, String status) => _setReviewStatus(
+    table: 'entity_relations',
+    targetType: 'relation',
+    id: id,
+    status: status,
+    knowledgeType: status == 'confirmed'
+        ? 'human_verified'
+        : status == 'rejected'
+        ? 'disputed'
+        : null,
+  );
 
-  Future<void> mergeEntities(String primaryId, List<String> otherIds) async {
-    for (final otherId in otherIds) {
-      if (otherId == primaryId) continue;
-      final primary = await store.db.query(
-        'entities',
+  Future<void> setEventStatus(String id, String status) => _setReviewStatus(
+    table: 'historical_events',
+    targetType: 'event',
+    id: id,
+    status: status,
+    knowledgeType: status == 'confirmed'
+        ? 'human_verified'
+        : status == 'rejected'
+        ? 'disputed'
+        : null,
+  );
+
+  Future<void> _setReviewStatus({
+    required String table,
+    required String targetType,
+    required String id,
+    required String status,
+    String? knowledgeType,
+  }) async {
+    await store.db.transaction((txn) async {
+      final before = await txn.query(
+        table,
         where: 'id = ?',
-        whereArgs: [primaryId],
+        whereArgs: [id],
         limit: 1,
       );
-      final other = await store.db.query(
-        'entities',
-        where: 'id = ?',
-        whereArgs: [otherId],
-        limit: 1,
-      );
-      if (primary.isEmpty || other.isEmpty) continue;
-      final aliases = {
-        ..._decodeStringList(primary.first['aliases']),
-        other.first['canonical_name'] as String,
-        ..._decodeStringList(other.first['aliases']),
+      final updates = <String, Object?>{
+        'status': status,
+        'updated_at': nowIso(),
+        if (knowledgeType != null) 'knowledge_type': knowledgeType,
       };
-      await store.db.update(
+      await txn.update(table, updates, where: 'id = ?', whereArgs: [id]);
+      await _audit(
+        txn,
+        targetType: targetType,
+        targetId: id,
+        action: 'status_$status',
+        before: before.isEmpty ? null : before.first,
+        after: updates,
+      );
+    });
+  }
+
+  Future<void> updateEntity(
+    String id, {
+    String? name,
+    String? kind,
+    List<String>? aliases,
+    String? dynasty,
+    String? status,
+  }) async {
+    final updates = <String, Object?>{
+      if (name != null && name.trim().isNotEmpty) 'canonical_name': name.trim(),
+      if (kind != null) 'kind': _normalizeEntityKind(kind),
+      if (aliases != null) 'aliases': jsonEncode(aliases),
+      if (dynasty != null) 'dynasty': dynasty,
+      if (status != null) 'status': status,
+      'updated_at': nowIso(),
+    };
+    await store.db.transaction((txn) async {
+      final before = await txn.query(
         'entities',
-        {'aliases': jsonEncode(aliases.toList()), 'updated_at': nowIso()},
+        where: 'id = ?',
+        whereArgs: [id],
+        limit: 1,
+      );
+      await txn.update('entities', updates, where: 'id = ?', whereArgs: [id]);
+      await _audit(
+        txn,
+        targetType: 'entity',
+        targetId: id,
+        action: 'update',
+        before: before.isEmpty ? null : before.first,
+        after: updates,
+      );
+    });
+  }
+
+  Future<void> updateRelation(
+    String id, {
+    String? type,
+    String? description,
+    String? status,
+  }) async {
+    final updates = <String, Object?>{
+      if (type != null && type.trim().isNotEmpty) 'relation_type': type.trim(),
+      if (description != null) 'description': description,
+      if (status != null) 'status': status,
+      'updated_at': nowIso(),
+    };
+    await store.db.transaction((txn) async {
+      final before = await txn.query(
+        'entity_relations',
+        where: 'id = ?',
+        whereArgs: [id],
+        limit: 1,
+      );
+      await txn.update(
+        'entity_relations',
+        updates,
+        where: 'id = ?',
+        whereArgs: [id],
+      );
+      await _audit(
+        txn,
+        targetType: 'relation',
+        targetId: id,
+        action: 'update',
+        before: before.isEmpty ? null : before.first,
+        after: updates,
+      );
+    });
+  }
+
+  Future<void> updateEvent(
+    String id, {
+    String? name,
+    String? type,
+    String? timeRaw,
+    int? year,
+    String? precision,
+    String? status,
+    bool markTimeReviewed = false,
+  }) async {
+    final updates = <String, Object?>{
+      if (name != null && name.trim().isNotEmpty) 'name': name.trim(),
+      if (type != null && type.trim().isNotEmpty) 'event_type': type.trim(),
+      if (timeRaw != null) 'time_raw': timeRaw,
+      if (year != null) 'time_start_year': year,
+      if (year != null) 'time_end_year': year,
+      if (precision != null) 'time_precision': precision,
+      if (status != null) 'status': status,
+      'updated_at': nowIso(),
+    };
+    await store.db.transaction((txn) async {
+      final before = await txn.query(
+        'historical_events',
+        where: 'id = ?',
+        whereArgs: [id],
+        limit: 1,
+      );
+      await txn.update(
+        'historical_events',
+        updates,
+        where: 'id = ?',
+        whereArgs: [id],
+      );
+      await _audit(
+        txn,
+        targetType: 'event',
+        targetId: id,
+        action: markTimeReviewed ? 'time_reviewed' : 'update',
+        before: before.isEmpty ? null : before.first,
+        after: updates,
+      );
+    });
+  }
+
+  Future<void> _audit(
+    DatabaseExecutor db, {
+    required String targetType,
+    required String targetId,
+    required String action,
+    Map<String, Object?>? before,
+    Map<String, Object?>? after,
+    String source = 'human',
+    String? taskId,
+  }) async {
+    await db.insert('knowledge_review_events', {
+      'id': newLocalId('review'),
+      'target_type': targetType,
+      'target_id': targetId,
+      'action': action,
+      'before_json': before == null ? null : jsonEncode(before),
+      'after_json': after == null ? null : jsonEncode(after),
+      'source': source,
+      'task_id': taskId,
+      'created_at': nowIso(),
+    });
+  }
+
+  Future<List<Map<String, Object?>>> reviewHistory({
+    String? targetType,
+    String? targetId,
+    int limit = 200,
+  }) async {
+    final rows = await store.db.query(
+      'knowledge_review_events',
+      where: targetType == null
+          ? null
+          : targetId == null
+          ? 'target_type = ?'
+          : 'target_type = ? AND target_id = ?',
+      whereArgs: targetType == null
+          ? null
+          : targetId == null
+          ? [targetType]
+          : [targetType, targetId],
+      orderBy: 'created_at DESC',
+      limit: limit,
+    );
+    return rows;
+  }
+
+  Future<void> undoReview(String auditId) async {
+    final rows = await store.db.query(
+      'knowledge_review_events',
+      where: 'id = ?',
+      whereArgs: [auditId],
+      limit: 1,
+    );
+    if (rows.isEmpty) return;
+    final row = rows.first;
+    final beforeRaw = row['before_json'] as String?;
+    if (beforeRaw == null) return;
+    final before = jsonDecode(beforeRaw) as Map<String, dynamic>;
+    final targetType = row['target_type'] as String;
+    final targetId = row['target_id'] as String;
+    final table = switch (targetType) {
+      'entity' => 'entities',
+      'relation' => 'entity_relations',
+      'event' => 'historical_events',
+      _ => null,
+    };
+    if (table == null) return;
+    const allowed = {
+      'canonical_name',
+      'kind',
+      'aliases',
+      'dynasty',
+      'status',
+      'knowledge_type',
+      'relation_type',
+      'description',
+      'name',
+      'event_type',
+      'time_raw',
+      'time_start_year',
+      'time_end_year',
+      'time_precision',
+      'updated_at',
+    };
+    final updates = <String, Object?>{
+      for (final entry in before.entries)
+        if (allowed.contains(entry.key)) entry.key: entry.value,
+      'updated_at': nowIso(),
+    };
+    await store.db.transaction((txn) async {
+      await txn.update(table, updates, where: 'id = ?', whereArgs: [targetId]);
+      await _audit(
+        txn,
+        targetType: targetType,
+        targetId: targetId,
+        action: 'undo',
+        before: row,
+        after: updates,
+      );
+    });
+  }
+
+  /// Merges [otherIds] into [primaryId], preserving all evidence and auditing
+  /// the operation. Duplicate relations/participants created by the merge are
+  /// consolidated instead of being left as separate rows.
+  Future<void> mergeEntities(String primaryId, List<String> otherIds) async {
+    if (otherIds.isEmpty) return;
+    await store.db.transaction((txn) async {
+      final primaryRows = await txn.query(
+        'entities',
         where: 'id = ?',
         whereArgs: [primaryId],
+        limit: 1,
       );
-      await store.db.update(
-        'entity_mentions',
-        {'entity_id': primaryId},
-        where: 'entity_id = ?',
-        whereArgs: [otherId],
+      if (primaryRows.isEmpty) return;
+      final primary = primaryRows.first;
+      final aliases = {..._decodeStringList(primary['aliases'])};
+      for (final otherId in otherIds) {
+        if (otherId == primaryId) continue;
+        final otherRows = await txn.query(
+          'entities',
+          where: 'id = ?',
+          whereArgs: [otherId],
+          limit: 1,
+        );
+        if (otherRows.isEmpty) continue;
+        final other = otherRows.first;
+        aliases
+          ..add('${other['canonical_name']}')
+          ..addAll(_decodeStringList(other['aliases']))
+          ..remove('${primary['canonical_name']}');
+        await txn.update(
+          'entities',
+          {'aliases': jsonEncode(aliases.toList()), 'updated_at': nowIso()},
+          where: 'id = ?',
+          whereArgs: [primaryId],
+        );
+        await txn.update(
+          'entity_mentions',
+          {'entity_id': primaryId},
+          where: 'entity_id = ?',
+          whereArgs: [otherId],
+        );
+        await txn.update(
+          'entity_relations',
+          {'from_entity_id': primaryId, 'updated_at': nowIso()},
+          where: 'from_entity_id = ?',
+          whereArgs: [otherId],
+        );
+        await txn.update(
+          'entity_relations',
+          {'to_entity_id': primaryId, 'updated_at': nowIso()},
+          where: 'to_entity_id = ?',
+          whereArgs: [otherId],
+        );
+        await txn.update(
+          'event_participants',
+          {'entity_id': primaryId},
+          where: 'entity_id = ?',
+          whereArgs: [otherId],
+        );
+        await txn.delete('entities', where: 'id = ?', whereArgs: [otherId]);
+        await _audit(
+          txn,
+          targetType: 'entity',
+          targetId: otherId,
+          action: 'merge_into:$primaryId',
+          before: other,
+          after: {'merged_into': primaryId},
+        );
+      }
+      await _dedupeRelations(txn);
+      await _dedupeParticipants(txn);
+    });
+  }
+
+  /// Splits selected mentions from [entityId] into a new entity.
+  Future<String> splitEntity({
+    required String entityId,
+    required List<String> mentionIds,
+    required String newName,
+  }) async {
+    final newId = newLocalId('ent');
+    await store.db.transaction((txn) async {
+      final rows = await txn.query(
+        'entities',
+        where: 'id = ?',
+        whereArgs: [entityId],
+        limit: 1,
       );
-      await store.db.update(
-        'entity_relations',
-        {'from_entity_id': primaryId},
-        where: 'from_entity_id = ?',
-        whereArgs: [otherId],
+      if (rows.isEmpty || mentionIds.isEmpty) return;
+      final source = rows.first;
+      final now = nowIso();
+      await txn.insert('entities', {
+        'id': newId,
+        'canonical_name': newName.trim().isEmpty
+            ? '${source['canonical_name']}（拆分）'
+            : newName.trim(),
+        'kind': source['kind'],
+        'aliases': '[]',
+        'dynasty': source['dynasty'],
+        'status': 'pending',
+        'knowledge_type': 'human_verified',
+        'created_at': now,
+        'updated_at': now,
+      });
+      final placeholders = List.filled(mentionIds.length, '?').join(',');
+      await txn.rawUpdate(
+        'UPDATE entity_mentions SET entity_id = ? WHERE id IN ($placeholders)',
+        [newId, ...mentionIds],
       );
-      await store.db.update(
-        'entity_relations',
-        {'to_entity_id': primaryId},
-        where: 'to_entity_id = ?',
-        whereArgs: [otherId],
+      await _audit(
+        txn,
+        targetType: 'entity',
+        targetId: entityId,
+        action: 'split_to:$newId',
+        before: source,
+        after: {'new_entity_id': newId, 'mention_ids': mentionIds},
       );
-      await store.db.update(
-        'event_participants',
-        {'entity_id': primaryId},
-        where: 'entity_id = ?',
-        whereArgs: [otherId],
-      );
-      await store.db.delete('entities', where: 'id = ?', whereArgs: [otherId]);
+    });
+    return newId;
+  }
+
+  Future<void> _dedupeRelations(DatabaseExecutor txn) async {
+    final groups = await txn.rawQuery('''
+      SELECT from_entity_id, to_entity_id, relation_type,
+             GROUP_CONCAT(id) AS ids
+      FROM entity_relations
+      GROUP BY from_entity_id, to_entity_id, relation_type
+      HAVING COUNT(*) > 1
+      ''');
+    for (final group in groups) {
+      final ids = '${group['ids']}'
+          .split(',')
+          .where((id) => id.isNotEmpty)
+          .toList();
+      if (ids.length < 2) continue;
+      final keep = ids.first;
+      for (final duplicate in ids.skip(1)) {
+        await txn.update(
+          'relation_sources',
+          {'relation_id': keep},
+          where: 'relation_id = ?',
+          whereArgs: [duplicate],
+        );
+        await txn.delete(
+          'entity_relations',
+          where: 'id = ?',
+          whereArgs: [duplicate],
+        );
+      }
+    }
+  }
+
+  Future<void> _dedupeParticipants(DatabaseExecutor txn) async {
+    final groups = await txn.rawQuery('''
+      SELECT event_id, name, GROUP_CONCAT(id) AS ids
+      FROM event_participants
+      GROUP BY event_id, name
+      HAVING COUNT(*) > 1
+      ''');
+    for (final group in groups) {
+      final ids = '${group['ids']}'
+          .split(',')
+          .where((id) => id.isNotEmpty)
+          .toList();
+      for (final duplicate in ids.skip(1)) {
+        await txn.delete(
+          'event_participants',
+          where: 'id = ?',
+          whereArgs: [duplicate],
+        );
+      }
     }
   }
 
@@ -1085,6 +1892,7 @@ class KnowledgeService {
           timePrecision: row['time_precision'] as String? ?? 'unknown',
           dynasty: row['dynasty'] as String?,
           status: row['status'] as String? ?? 'extracted',
+          knowledgeType: row['knowledge_type'] as String? ?? 'inferred',
         ),
     ];
   }
@@ -1122,6 +1930,7 @@ class KnowledgeService {
       timePrecision: row['time_precision'] as String? ?? 'unknown',
       dynasty: row['dynasty'] as String?,
       status: row['status'] as String? ?? 'extracted',
+      knowledgeType: row['knowledge_type'] as String? ?? 'inferred',
       participants: [
         for (final participant in participantRows)
           participant['name'] as String,
@@ -1134,15 +1943,6 @@ class KnowledgeService {
             chapterTitle: source['chapter_title'] as String?,
           ),
       ],
-    );
-  }
-
-  Future<void> setEventStatus(String id, String status) async {
-    await store.db.update(
-      'historical_events',
-      {'status': status, 'updated_at': nowIso()},
-      where: 'id = ?',
-      whereArgs: [id],
     );
   }
 
@@ -1251,6 +2051,68 @@ class KnowledgeException implements Exception {
   final String message;
   @override
   String toString() => message;
+}
+
+class _EntityCandidate {
+  const _EntityCandidate({
+    required this.id,
+    required this.name,
+    required this.kind,
+    required this.status,
+    required this.score,
+    this.dynasty,
+  });
+
+  final String id;
+  final String name;
+  final String kind;
+  final String? dynasty;
+  final String status;
+  final double score;
+}
+
+class _EntityDecision {
+  const _EntityDecision({
+    required this.entityId,
+    required this.isNew,
+    required this.status,
+    required this.confidence,
+    required this.candidates,
+    required this.name,
+    required this.kind,
+    required this.record,
+    this.reason,
+    this.dynasty,
+  });
+
+  final String entityId;
+  final bool isNew;
+  final String status;
+  final double confidence;
+  final List<_EntityCandidate> candidates;
+  final String name;
+  final String kind;
+  final String? dynasty;
+  final String? reason;
+  final bool record;
+}
+
+class _ExtractionContext {
+  const _ExtractionContext({
+    required this.taskId,
+    required this.providerId,
+    required this.modelId,
+    required this.promptVersion,
+    required this.schemaVersion,
+    required this.chunkIndex,
+  });
+
+  final String taskId;
+  final String providerId;
+  final String modelId;
+  final int promptVersion;
+  final int schemaVersion;
+  final int chunkIndex;
 }
 
 class _KnowledgeChunk {

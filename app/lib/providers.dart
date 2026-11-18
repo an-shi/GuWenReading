@@ -13,6 +13,7 @@ export '../core/providers.dart'
         localStoreProvider,
         aiSettingsProvider,
         budgetServiceProvider,
+        qualityServiceProvider,
         importServiceProvider,
         translationServiceProvider,
         knowledgeServiceProvider,
@@ -118,6 +119,10 @@ final tasksProvider = AsyncNotifierProvider<TasksController, List<TaskInfo>>(
 
 final aiUsageSummaryProvider = FutureProvider<AiUsageSummary>((ref) {
   return ref.watch(localStoreProvider).aiUsageSummary();
+});
+
+final aiCostAnalyticsProvider = FutureProvider<AiUsageAnalytics>((ref) {
+  return ref.watch(localStoreProvider).aiUsageAnalytics();
 });
 
 class TasksController extends AsyncNotifier<List<TaskInfo>> {

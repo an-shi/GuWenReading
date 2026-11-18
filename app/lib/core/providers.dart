@@ -9,6 +9,7 @@ import 'local/import_service.dart';
 import 'local/knowledge_service.dart';
 import 'local/local_api.dart';
 import 'local/local_store.dart';
+import 'local/quality_service.dart';
 import 'local/search_service.dart';
 import 'local/task_recovery_service.dart';
 import 'local/translation_service.dart';
@@ -33,6 +34,10 @@ final budgetServiceProvider = Provider<BudgetService>((ref) {
   return BudgetService(store: ref.watch(localStoreProvider));
 });
 
+final qualityServiceProvider = Provider<QualityService>((ref) {
+  return const QualityService();
+});
+
 final importServiceProvider = Provider<ImportService>((ref) {
   return ImportService(
     store: ref.watch(localStoreProvider),
@@ -46,6 +51,7 @@ final translationServiceProvider = Provider<TranslationService>((ref) {
     aiSettings: ref.watch(aiSettingsProvider),
     client: ref.watch(aiClientProvider),
     budgets: ref.watch(budgetServiceProvider),
+    quality: ref.watch(qualityServiceProvider),
   );
 });
 
@@ -55,6 +61,7 @@ final knowledgeServiceProvider = Provider<KnowledgeService>((ref) {
     aiSettings: ref.watch(aiSettingsProvider),
     client: ref.watch(aiClientProvider),
     budgets: ref.watch(budgetServiceProvider),
+    quality: ref.watch(qualityServiceProvider),
   );
 });
 

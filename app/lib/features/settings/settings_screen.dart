@@ -9,6 +9,7 @@ import 'package:path/path.dart' as p;
 
 import '../../core/local/app_database.dart';
 import '../../core/local/ai_scheduler.dart';
+import '../../core/local/ai_service.dart';
 import '../../core/local/backup_service.dart';
 import '../../core/local/budget_service.dart';
 import '../../core/local/data_directory_service.dart';
@@ -31,6 +32,7 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
   List<AiProviderRecord> _providers = const [];
   List<AiModelRecord> _models = const [];
   List<PromptRecord> _prompts = const [];
+  List<PromptSchemaRecord> _schemas = const [];
   List<BackupInfo> _backups = const [];
   BudgetStatus _budgetStatus = const BudgetStatus();
   String? _selectedPromptKey;
@@ -49,6 +51,7 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
     final providers = await ai.providers();
     final models = await ai.models();
     final prompts = await store.allPrompts();
+    final schemas = await store.allSchemas();
     final files = await backups.listBackups();
     final budgetStatus = await ref.read(budgetServiceProvider).status();
     if (!mounted) return;
@@ -56,6 +59,7 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
       _providers = providers;
       _models = models;
       _prompts = prompts;
+      _schemas = schemas;
       _backups = files;
       _budgetStatus = budgetStatus;
       _selectedPromptKey ??= prompts.isEmpty ? null : prompts.first.key;
@@ -315,6 +319,17 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
             ],
           ),
         ),
+        const SizedBox(height: 14),
+        _SectionCard(
+          title: 'Provider 故障切换',
+          subtitle: '仅在超时、429、5xx 等可恢复错误时切换到备用模型；认证、模型不存在等配置错误不会切换。',
+          action: OutlinedButton.icon(
+            onPressed: _editFailover,
+            icon: const Icon(Icons.swap_horiz_rounded),
+            label: const Text('配置'),
+          ),
+          child: const Text('切换后的实际 Provider、模型、费用和切换原因都会记录到 AI 用量。'),
+        ),
       ],
     );
   }
@@ -416,10 +431,22 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
     return _SectionCard(
       title: active.name,
       subtitle: active.description ?? '当前生效版本 v${active.version}',
-      action: FilledButton.tonalIcon(
-        onPressed: () => _createPromptVersion(active, versions),
-        icon: const Icon(Icons.add),
-        label: const Text('创建新版本'),
+      action: Wrap(
+        spacing: 8,
+        children: [
+          OutlinedButton.icon(
+            onPressed: versions.length < 2
+                ? null
+                : () => _comparePromptVersions(active, versions),
+            icon: const Icon(Icons.compare_arrows_rounded),
+            label: const Text('对比版本'),
+          ),
+          FilledButton.tonalIcon(
+            onPressed: () => _createPromptVersion(active, versions),
+            icon: const Icon(Icons.add),
+            label: const Text('创建新版本'),
+          ),
+        ],
       ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
@@ -452,6 +479,117 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
                       child: const Text('启用'),
                     ),
             ),
+          if (_schemas.any((schema) => schema.key == active.key)) ...[
+            const SizedBox(height: 18),
+            Text('输出 Schema', style: theme.textTheme.titleSmall),
+            const SizedBox(height: 6),
+            for (final schema in _schemas.where(
+              (schema) => schema.key == active.key,
+            ))
+              ListTile(
+                contentPadding: EdgeInsets.zero,
+                dense: true,
+                title: Text('v${schema.version} · ${schema.name}'),
+                subtitle: Text(schema.description ?? ''),
+                trailing: schema.isActive
+                    ? const Chip(label: Text('当前'))
+                    : TextButton(
+                        onPressed: () async {
+                          await ref
+                              .read(localStoreProvider)
+                              .activateSchema(schema.key, schema.version);
+                          await _reload();
+                        },
+                        child: const Text('启用'),
+                      ),
+                onTap: () => _showSchema(schema),
+              ),
+          ],
+        ],
+      ),
+    );
+  }
+
+  Future<void> _comparePromptVersions(
+    PromptRecord active,
+    List<PromptRecord> versions,
+  ) async {
+    final others = versions.where((item) => item.version != active.version);
+    if (others.isEmpty) return;
+    final other = await showDialog<PromptRecord>(
+      context: context,
+      builder: (context) => SimpleDialog(
+        title: const Text('选择对比版本'),
+        children: [
+          for (final version in others)
+            SimpleDialogOption(
+              onPressed: () => Navigator.pop(context, version),
+              child: Text('v${version.version} · ${version.name}'),
+            ),
+        ],
+      ),
+    );
+    if (other == null || !mounted) return;
+    await showDialog<void>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: Text('v${active.version} 与 v${other.version}'),
+        content: SizedBox(
+          width: 860,
+          height: 520,
+          child: Row(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Expanded(
+                child: SingleChildScrollView(
+                  child: SelectableText(
+                    active.template,
+                    style: const TextStyle(fontSize: 12, height: 1.6),
+                  ),
+                ),
+              ),
+              const VerticalDivider(width: 24),
+              Expanded(
+                child: SingleChildScrollView(
+                  child: SelectableText(
+                    other.template,
+                    style: const TextStyle(fontSize: 12, height: 1.6),
+                  ),
+                ),
+              ),
+            ],
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: const Text('关闭'),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Future<void> _showSchema(PromptSchemaRecord schema) async {
+    await showDialog<void>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: Text('${schema.key} · v${schema.version}'),
+        content: SizedBox(
+          width: 720,
+          height: 420,
+          child: SingleChildScrollView(
+            child: SelectableText(
+              schema.schemaJson,
+              style: const TextStyle(fontSize: 12, height: 1.6),
+            ),
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: const Text('关闭'),
+          ),
         ],
       ),
     );
@@ -782,6 +920,63 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
       interval,
     ]) {
       controller.dispose();
+    }
+  }
+
+  Future<void> _editFailover() async {
+    final ai = ref.read(aiSettingsProvider);
+    final config = await ai.failoverConfig();
+    final models = await ai.models();
+    if (!mounted) return;
+    var enabled = config.enabled;
+    var fallbackId = config.fallbackModelId;
+    final saved = await showDialog<bool>(
+      context: context,
+      builder: (context) => StatefulBuilder(
+        builder: (context, setDialogState) => AlertDialog(
+          title: const Text('Provider 故障切换'),
+          content: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              SwitchListTile(
+                contentPadding: EdgeInsets.zero,
+                title: const Text('启用故障切换'),
+                subtitle: const Text('主模型连续失败后切到备用模型一次'),
+                value: enabled,
+                onChanged: (value) => setDialogState(() => enabled = value),
+              ),
+              DropdownButtonFormField<String>(
+                initialValue: fallbackId,
+                decoration: const InputDecoration(labelText: '备用模型'),
+                items: [
+                  for (final model in models)
+                    DropdownMenuItem(
+                      value: model.id,
+                      child: Text(model.displayName),
+                    ),
+                ],
+                onChanged: (value) => setDialogState(() => fallbackId = value),
+              ),
+            ],
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(context, false),
+              child: const Text('取消'),
+            ),
+            FilledButton(
+              onPressed: () => Navigator.pop(context, true),
+              child: const Text('保存'),
+            ),
+          ],
+        ),
+      ),
+    );
+    if (saved == true) {
+      await ai.saveFailoverConfig(
+        AiFailoverConfig(enabled: enabled, fallbackModelId: fallbackId),
+      );
+      _toast('故障切换配置已保存');
     }
   }
 
@@ -1155,6 +1350,7 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
     final tokenizer = TextEditingController(text: model?.tokenizer ?? '');
     var selectedProvider = providerId;
     var supportsJson = model?.supportsJson ?? true;
+    var promptCaching = model?.promptCaching ?? false;
     var defaultTranslation = model?.isDefaultTranslation ?? false;
     var defaultChat = model?.isDefaultChat ?? false;
     var defaultExtraction = model?.isDefaultExtraction ?? false;
@@ -1319,6 +1515,16 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
                   onChanged: (value) =>
                       setDialogState(() => supportsJson = value),
                 ),
+                SwitchListTile(
+                  contentPadding: EdgeInsets.zero,
+                  title: const Text('启用 Provider 原生 Prompt Caching'),
+                  subtitle: const Text(
+                    'Anthropic 会发送 cache_control；OpenAI 兼容服务由服务商自动前缀缓存。',
+                  ),
+                  value: promptCaching,
+                  onChanged: (value) =>
+                      setDialogState(() => promptCaching = value),
+                ),
                 Wrap(
                   spacing: 8,
                   children: [
@@ -1417,6 +1623,7 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
       tokenizer: tokenizer.text.trim().isEmpty ? null : tokenizer.text.trim(),
       capabilities: capabilities,
       supportsJson: supportsJson,
+      promptCaching: promptCaching,
       isDefaultTranslation: defaultTranslation,
       isDefaultChat: defaultChat,
       isDefaultExtraction: defaultExtraction,

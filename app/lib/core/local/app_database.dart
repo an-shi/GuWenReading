@@ -319,6 +319,15 @@ class AppDatabase {
   }
 
   static Future<void> _migrate(Database db) async {
+    const provenanceColumns = <String, String>{
+      'chunk_index': 'INTEGER',
+      'task_id': 'TEXT',
+      'provider_id': 'TEXT',
+      'model_id': 'TEXT',
+      'prompt_version': 'INTEGER',
+      'schema_version': 'INTEGER',
+      'extracted_at': 'TEXT',
+    };
     const additions = <String, Map<String, String>>{
       'tasks': {
         'input_tokens': 'INTEGER NOT NULL DEFAULT 0',
@@ -333,7 +342,13 @@ class AppDatabase {
         'stage': 'TEXT',
         'checkpoint': 'TEXT',
       },
-      'ai_usage': {'token_source': "TEXT NOT NULL DEFAULT 'provider_actual'"},
+      'ai_usage': {
+        'token_source': "TEXT NOT NULL DEFAULT 'provider_actual'",
+        'prompt_version': 'INTEGER',
+        'schema_version': 'INTEGER',
+        'failover_from_model': 'TEXT',
+        'failover_reason': 'TEXT',
+      },
       'ai_models': {
         'is_default_extraction': 'INTEGER NOT NULL DEFAULT 0',
         'input_price': 'REAL NOT NULL DEFAULT 0',
@@ -341,8 +356,19 @@ class AppDatabase {
         'cache_read_price': 'REAL NOT NULL DEFAULT 0',
         'cache_write_price': 'REAL NOT NULL DEFAULT 0',
         'tokenizer': 'TEXT',
+        'prompt_caching': 'INTEGER NOT NULL DEFAULT 0',
       },
-      'historical_events': {'fingerprint': 'TEXT'},
+      'historical_events': {
+        'fingerprint': 'TEXT',
+        'knowledge_type': "TEXT NOT NULL DEFAULT 'inferred'",
+      },
+      'entities': {'knowledge_type': "TEXT NOT NULL DEFAULT 'explicit'"},
+      'entity_relations': {
+        'knowledge_type': "TEXT NOT NULL DEFAULT 'inferred'",
+      },
+      'entity_mentions': provenanceColumns,
+      'relation_sources': provenanceColumns,
+      'event_sources': provenanceColumns,
     };
     for (final entry in additions.entries) {
       final info = await db.rawQuery('PRAGMA table_info(${entry.key})');

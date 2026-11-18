@@ -37,6 +37,7 @@ class _TasksScreenState extends ConsumerState<TasksScreen> {
 
   Future<void> _refresh() async {
     ref.invalidate(aiUsageSummaryProvider);
+    ref.invalidate(aiCostAnalyticsProvider);
     await ref.read(tasksProvider.notifier).refresh();
   }
 
@@ -75,6 +76,7 @@ class _TasksScreenState extends ConsumerState<TasksScreen> {
       body: Column(
         children: [
           _UsageSummaryCard(summary: ref.watch(aiUsageSummaryProvider)),
+          _CostAnalyticsCard(analytics: ref.watch(aiCostAnalyticsProvider)),
           Expanded(
             child: async.when(
               loading: () => const Center(child: CircularProgressIndicator()),
@@ -288,6 +290,103 @@ class _UsageSummaryCard extends StatelessWidget {
             for (final group in data.byModel)
               _UsageGroupRow(label: group.label, group: group),
           ],
+        ],
+      ),
+    );
+  }
+}
+
+class _CostAnalyticsCard extends StatelessWidget {
+  const _CostAnalyticsCard({required this.analytics});
+
+  final AsyncValue<AiUsageAnalytics> analytics;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final data = analytics.value;
+    if (data == null) return const SizedBox.shrink();
+    final successRate = data.totalRequests == 0
+        ? 1.0
+        : (data.totalRequests - data.failedRequests) / data.totalRequests;
+    return Card(
+      margin: const EdgeInsets.fromLTRB(18, 8, 18, 0),
+      child: ExpansionTile(
+        shape: const Border(),
+        collapsedShape: const Border(),
+        leading: Icon(
+          Icons.analytics_outlined,
+          size: 20,
+          color: theme.colorScheme.tertiary,
+        ),
+        title: Text('成本与质量分析', style: theme.textTheme.titleSmall),
+        subtitle: Text(
+          '缓存节省 ${_formatCost(data.cacheSavedCost)} · '
+          '质量通过率 ${(data.qualityPassRate * 100).toStringAsFixed(1)}% · '
+          '失败 ${data.failedRequests} 次',
+          style: theme.textTheme.labelSmall?.copyWith(
+            color: theme.colorScheme.onSurface.withValues(alpha: 0.5),
+          ),
+        ),
+        childrenPadding: const EdgeInsets.fromLTRB(16, 0, 16, 12),
+        children: [
+          Wrap(
+            spacing: 8,
+            runSpacing: 8,
+            children: [
+              _UsageMetric(label: '平均耗时', value: '${data.avgDurationMs} ms'),
+              _UsageMetric(label: '重试', value: _formatInt(data.retryCount)),
+              _UsageMetric(
+                label: '翻译均费',
+                value: _formatCost(data.translationAvgCost),
+              ),
+              _UsageMetric(
+                label: '抽取均费',
+                value: _formatCost(data.extractionAvgCost),
+              ),
+              _UsageMetric(
+                label: '每实体',
+                value: _formatCost(data.entityAvgCost),
+              ),
+              _UsageMetric(
+                label: '每关系',
+                value: _formatCost(data.relationAvgCost),
+              ),
+              _UsageMetric(label: '每事件', value: _formatCost(data.eventAvgCost)),
+              _UsageMetric(
+                label: '任务',
+                value:
+                    '运行 ${data.runningTasks} · 排队 ${data.queuedTasks} · '
+                    '中断 ${data.interruptedTasks}',
+              ),
+            ],
+          ),
+          if (data.byProvider.isNotEmpty) ...[
+            const SizedBox(height: 12),
+            Align(
+              alignment: Alignment.centerLeft,
+              child: Text(
+                '按服务商',
+                style: theme.textTheme.labelSmall?.copyWith(
+                  color: theme.colorScheme.onSurface.withValues(alpha: 0.45),
+                ),
+              ),
+            ),
+            const SizedBox(height: 4),
+            for (final group in data.byProvider)
+              _UsageGroupRow(label: group.label, group: group),
+          ],
+          const SizedBox(height: 6),
+          Align(
+            alignment: Alignment.centerLeft,
+            child: Text(
+              '成功率参考：${(successRate * 100).toStringAsFixed(1)}%；'
+              '样本 ${_formatInt(data.qualitySamples)} 次质量检查',
+              style: theme.textTheme.labelSmall?.copyWith(
+                color: theme.colorScheme.onSurface.withValues(alpha: 0.45),
+              ),
+            ),
+          ),
         ],
       ),
     );

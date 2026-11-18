@@ -562,6 +562,7 @@ class HistoricalEntity {
     this.summary,
     this.aliases = const [],
     this.status = 'pending',
+    this.knowledgeType = 'explicit',
     this.mentions = const [],
     this.relations = const [],
   });
@@ -574,6 +575,7 @@ class HistoricalEntity {
   final String? summary;
   final List<String> aliases;
   final String status;
+  final String knowledgeType;
   final List<EntityMention> mentions;
   final List<EntityRelation> relations;
 
@@ -589,6 +591,7 @@ class HistoricalEntity {
             .map((e) => '$e')
             .toList(),
         status: json['status'] as String? ?? 'pending',
+        knowledgeType: json['knowledge_type'] as String? ?? 'explicit',
         mentions: (json['mentions'] as List? ?? const [])
             .whereType<Map>()
             .map((e) => EntityMention.fromJson(e.cast<String, dynamic>()))
@@ -636,6 +639,7 @@ class EntityRelation {
     this.otherName,
     this.description,
     this.status = 'inferred',
+    this.knowledgeType = 'inferred',
     this.sources = const [],
     this.otherId,
   });
@@ -644,6 +648,7 @@ class EntityRelation {
   final String? otherName;
   final String? description;
   final String status;
+  final String knowledgeType;
   final List<RelationSource> sources;
   final String? otherId;
 
@@ -653,6 +658,7 @@ class EntityRelation {
     otherName: _str(json['other_entity_name']),
     description: _str(json['description']),
     status: json['status'] as String? ?? 'inferred',
+    knowledgeType: json['knowledge_type'] as String? ?? 'inferred',
     otherId: _str(json['other_entity_id']),
     sources: (json['sources'] as List? ?? const [])
         .whereType<Map>()
@@ -685,6 +691,7 @@ class HistoricalEvent {
     this.timePrecision = 'unknown',
     this.dynasty,
     this.status = 'extracted',
+    this.knowledgeType = 'inferred',
     this.participants = const [],
     this.sources = const [],
   });
@@ -698,6 +705,7 @@ class HistoricalEvent {
   final String timePrecision;
   final String? dynasty;
   final String status;
+  final String knowledgeType;
   final List<String> participants;
   final List<RelationSource> sources;
 
@@ -714,6 +722,7 @@ class HistoricalEvent {
         timePrecision: json['time_precision'] as String? ?? 'unknown',
         dynasty: _str(json['dynasty']),
         status: json['status'] as String? ?? 'extracted',
+        knowledgeType: json['knowledge_type'] as String? ?? 'inferred',
         participants: (json['participants'] as List? ?? const [])
             .map((e) => e is Map ? (e['name'] as String? ?? '') : '$e')
             .where((e) => e.isNotEmpty)

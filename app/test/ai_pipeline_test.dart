@@ -187,6 +187,8 @@ void main() {
       );
       expect(usageRows.first['token_source'], 'provider_actual');
       expect(usageRows.first['is_estimated'], 0);
+      expect(usageRows.first['prompt_version'], isNotNull);
+      expect(usageRows.first['schema_version'], isNotNull);
       final translatedCount = await store.db.rawQuery(
         'SELECT COUNT(*) AS n FROM translations',
       );
@@ -257,6 +259,25 @@ void main() {
             .first['n'],
         greaterThan(1),
       );
+      final entityKnowledge = await store.db.rawQuery(
+        'SELECT DISTINCT knowledge_type FROM entities',
+      );
+      expect(
+        entityKnowledge.map((row) => row['knowledge_type']),
+        everyElement('explicit'),
+      );
+      final provenance = await store.db.rawQuery(
+        'SELECT task_id, provider_id, model_id, prompt_version, schema_version '
+        'FROM event_sources LIMIT 1',
+      );
+      expect(provenance.first['task_id'], knowledgeTask.id);
+      expect(provenance.first['provider_id'], isNotNull);
+      expect(provenance.first['model_id'], isNotNull);
+      expect(provenance.first['prompt_version'], isNotNull);
+      expect(provenance.first['schema_version'], isNotNull);
+      final quality = await store.qualityReports();
+      expect(quality.any((row) => row['scope'] == 'translation_batch'), isTrue);
+      expect(quality.any((row) => row['scope'] == 'knowledge_chunk'), isTrue);
 
       final requestsBeforeRepeat = knowledgeRequests;
       final repeatedTask = await knowledge.startExtraction(chapter.id);

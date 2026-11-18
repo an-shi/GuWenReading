@@ -115,6 +115,174 @@ void main() {
     await server.close(force: true);
   });
 
+  test('retryable primary failure switches to the fallback model', () async {
+    final primary = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+    final fallback = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+    primary.listen((request) async {
+      request.response.statusCode = 503;
+      request.response.write(
+        jsonEncode({
+          'error': {'message': 'down'},
+        }),
+      );
+      await request.response.close();
+    });
+    var fallbackRequests = 0;
+    fallback.listen((request) async {
+      fallbackRequests += 1;
+      request.response.headers.contentType = ContentType.json;
+      request.response.write(
+        jsonEncode({
+          'choices': [
+            {
+              'message': {'content': '备用成功'},
+            },
+          ],
+          'usage': {'prompt_tokens': 8, 'completion_tokens': 2},
+        }),
+      );
+      await request.response.close();
+    });
+
+    final database = await AppDatabase.openInMemory();
+    final store = LocalStore(database);
+    final ai = AiSettingsService(store: store);
+    final primaryProvider = newLocalId('provider');
+    final fallbackProvider = newLocalId('provider');
+    await ai.saveProvider(
+      AiProviderRecord(
+        id: primaryProvider,
+        name: 'Primary',
+        kind: 'openai_compatible',
+        baseUrl: 'http://127.0.0.1:${primary.port}/v1',
+      ),
+    );
+    await ai.saveProvider(
+      AiProviderRecord(
+        id: fallbackProvider,
+        name: 'Fallback',
+        kind: 'openai_compatible',
+        baseUrl: 'http://127.0.0.1:${fallback.port}/v1',
+      ),
+    );
+    final primaryModelId = newLocalId('model');
+    final fallbackModelId = newLocalId('model');
+    await ai.saveModel(
+      AiModelRecord(
+        id: primaryModelId,
+        providerId: primaryProvider,
+        name: 'primary',
+        displayName: 'Primary Model',
+        isDefaultChat: true,
+      ),
+    );
+    await ai.saveModel(
+      AiModelRecord(
+        id: fallbackModelId,
+        providerId: fallbackProvider,
+        name: 'fallback',
+        displayName: 'Fallback Model',
+      ),
+    );
+    await ai.saveFailoverConfig(
+      AiFailoverConfig(enabled: true, fallbackModelId: fallbackModelId),
+    );
+    final scheduler = AiScheduler.instance;
+    final original = scheduler.config;
+    scheduler.setConfig(
+      original.copyWith(minRequestIntervalMs: 0, maxRetries: 0),
+    );
+    final text = await AiJsonClient(ai).chat(purpose: 'chat', prompt: '你好');
+    expect(text, '备用成功');
+    expect(fallbackRequests, 1);
+    final usage = await store.db.query('ai_usage', orderBy: 'created_at ASC');
+    expect(usage, hasLength(2));
+    expect(usage.first['model_id'], primaryModelId);
+    expect(usage.last['model_id'], fallbackModelId);
+    expect(usage.last['failover_from_model'], contains('Primary Model'));
+    expect(usage.last['failover_reason'], isNotNull);
+    scheduler.setConfig(original);
+    await database.close();
+    await primary.close(force: true);
+    await fallback.close(force: true);
+  });
+
+  test('non-retryable primary errors do not switch providers', () async {
+    final primary = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+    final fallback = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+    primary.listen((request) async {
+      request.response.statusCode = 401;
+      request.response.write(
+        jsonEncode({
+          'error': {'message': 'bad key'},
+        }),
+      );
+      await request.response.close();
+    });
+    var fallbackRequests = 0;
+    fallback.listen((request) async {
+      fallbackRequests += 1;
+      request.response.write(jsonEncode({}));
+      await request.response.close();
+    });
+    final database = await AppDatabase.openInMemory();
+    final store = LocalStore(database);
+    final ai = AiSettingsService(store: store);
+    final p1 = newLocalId('provider');
+    final p2 = newLocalId('provider');
+    await ai.saveProvider(
+      AiProviderRecord(
+        id: p1,
+        name: 'Primary',
+        kind: 'openai_compatible',
+        baseUrl: 'http://127.0.0.1:${primary.port}/v1',
+      ),
+    );
+    await ai.saveProvider(
+      AiProviderRecord(
+        id: p2,
+        name: 'Fallback',
+        kind: 'openai_compatible',
+        baseUrl: 'http://127.0.0.1:${fallback.port}/v1',
+      ),
+    );
+    final fallbackModelId = newLocalId('model');
+    await ai.saveModel(
+      AiModelRecord(
+        id: newLocalId('model'),
+        providerId: p1,
+        name: 'primary',
+        displayName: 'Primary',
+        isDefaultChat: true,
+      ),
+    );
+    await ai.saveModel(
+      AiModelRecord(
+        id: fallbackModelId,
+        providerId: p2,
+        name: 'fallback',
+        displayName: 'Fallback',
+      ),
+    );
+    await ai.saveFailoverConfig(
+      AiFailoverConfig(enabled: true, fallbackModelId: fallbackModelId),
+    );
+    final scheduler = AiScheduler.instance;
+    final original = scheduler.config;
+    scheduler.setConfig(
+      original.copyWith(minRequestIntervalMs: 0, maxRetries: 2),
+    );
+    await expectLater(
+      AiJsonClient(ai).chat(purpose: 'chat', prompt: '你好'),
+      throwsA(isA<AiRequestException>()),
+    );
+    expect(fallbackRequests, 0);
+    scheduler.setConfig(original);
+    await database.close();
+    await primary.close(force: true);
+    await fallback.close(force: true);
+  });
+
   test('non-retryable errors are not retried', () async {
     final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
     var requests = 0;

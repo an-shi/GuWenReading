@@ -1091,6 +1091,121 @@ class LocalStore {
     return rows.isEmpty ? null : _taskFromRow(rows.first);
   }
 
+  Future<void> recordQualityReport({
+    String? taskId,
+    required String scope,
+    String? reference,
+    required String status,
+    required List<Map<String, Object?>> issues,
+  }) async {
+    try {
+      await db.insert('ai_quality_reports', {
+        'id': newLocalId('quality'),
+        'task_id': taskId,
+        'scope': scope,
+        'reference': reference,
+        'status': status,
+        'issues_json': jsonEncode(issues),
+        'created_at': nowIso(),
+      });
+    } catch (_) {
+      // Quality reporting must not fail a successful AI call.
+    }
+  }
+
+  Future<List<Map<String, Object?>>> qualityReports({
+    String? taskId,
+    int limit = 100,
+  }) async {
+    final rows = await db.query(
+      'ai_quality_reports',
+      where: taskId == null ? null : 'task_id = ?',
+      whereArgs: taskId == null ? null : [taskId],
+      orderBy: 'created_at DESC',
+      limit: limit,
+    );
+    return rows
+        .map(
+          (row) => {
+            ...row,
+            'issues': jsonDecode('${row['issues_json'] ?? '[]'}'),
+          },
+        )
+        .toList();
+  }
+
+  Future<String?> entityDisambiguationCache(String cacheKey) async {
+    final rows = await db.query(
+      'entity_disambiguation_cache',
+      where: 'cache_key = ?',
+      whereArgs: [cacheKey],
+      limit: 1,
+    );
+    return rows.isEmpty ? null : rows.first['result_json'] as String?;
+  }
+
+  Future<void> putEntityDisambiguationCache({
+    required String cacheKey,
+    required String resultJson,
+  }) async {
+    await db.insert('entity_disambiguation_cache', {
+      'cache_key': cacheKey,
+      'result_json': resultJson,
+      'created_at': nowIso(),
+    }, conflictAlgorithm: ConflictAlgorithm.replace);
+  }
+
+  Future<void> recordEntityDisambiguation({
+    String? taskId,
+    required String extractedName,
+    String? kind,
+    String? dynasty,
+    required List<String> candidateIds,
+    String? chosenEntityId,
+    required String status,
+    required double confidence,
+    String? reason,
+    String? modelId,
+  }) async {
+    await db.insert('entity_disambiguations', {
+      'id': newLocalId('disamb'),
+      'task_id': taskId,
+      'extracted_name': extractedName,
+      'kind': kind,
+      'dynasty': dynasty,
+      'candidate_ids': jsonEncode(candidateIds),
+      'chosen_entity_id': chosenEntityId,
+      'status': status,
+      'confidence': confidence,
+      'reason': reason,
+      'model_id': modelId,
+      'created_at': nowIso(),
+    });
+  }
+
+  Future<void> insertEntity({
+    required String id,
+    required String canonicalName,
+    required String kind,
+    required List<String> aliases,
+    String? dynasty,
+    String status = 'pending',
+    String knowledgeType = 'explicit',
+  }) async {
+    final now = nowIso();
+    await db.insert('entities', {
+      'id': id,
+      'canonical_name': canonicalName,
+      'kind': kind,
+      'aliases': jsonEncode(aliases),
+      'dynasty': dynasty,
+      'status': status,
+      'knowledge_type': knowledgeType,
+      'created_at': now,
+      'updated_at': now,
+    }, conflictAlgorithm: ConflictAlgorithm.ignore);
+  }
+
   Future<void> recordAiUsage({
     String? taskId,
     required String taskType,
@@ -1109,6 +1224,10 @@ class LocalStore {
     int retryCount = 0,
     bool isEstimated = false,
     String tokenSource = 'provider_actual',
+    int? promptVersion,
+    int? schemaVersion,
+    String? failoverFromModel,
+    String? failoverReason,
   }) async {
     final now = nowIso();
     final totalTokens =
@@ -1133,6 +1252,10 @@ class LocalStore {
         'retry_count': retryCount,
         'is_estimated': isEstimated ? 1 : 0,
         'token_source': tokenSource,
+        'prompt_version': promptVersion,
+        'schema_version': schemaVersion,
+        'failover_from_model': failoverFromModel,
+        'failover_reason': failoverReason,
         'error': error,
         'created_at': now,
       });
@@ -1207,6 +1330,97 @@ class LocalStore {
       estimatedRequests: total['estimated_requests'] as int? ?? 0,
       byType: typeRows.map(_usageGroupFromRow).toList(),
       byModel: modelRows.map(_usageGroupFromRow).toList(),
+    );
+  }
+
+  Future<AiUsageAnalytics> aiUsageAnalytics() async {
+    final totals = (await db.rawQuery('''
+      SELECT COALESCE(SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END), 0) AS failed,
+             COUNT(*) AS total,
+             COALESCE(SUM(retry_count), 0) AS retries,
+             COALESCE(AVG(duration_ms), 0) AS avg_duration
+      FROM ai_usage
+      ''')).first;
+    final providerRows = await db.rawQuery('''
+      SELECT COALESCE(provider_name, '未记录服务商') AS label,
+             COUNT(*) AS requests,
+             COALESCE(SUM(cost), 0) AS cost,
+             COALESCE(SUM(input_tokens), 0) AS input_tokens,
+             COALESCE(SUM(output_tokens), 0) AS output_tokens,
+             COALESCE(SUM(cache_read_tokens), 0) AS cache_read_tokens,
+             COALESCE(SUM(cache_write_tokens), 0) AS cache_write_tokens
+      FROM ai_usage GROUP BY provider_name ORDER BY cost DESC
+      ''');
+    final savings = (await db.rawQuery('''
+      SELECT COALESCE(SUM(
+        u.cache_read_tokens * MAX(
+          m.input_price - CASE WHEN m.cache_read_price > 0
+            THEN m.cache_read_price ELSE m.input_price END,
+          0
+        )
+      ) / 1000000.0, 0) AS saved
+      FROM ai_usage u JOIN ai_models m ON m.id = u.model_id
+      ''')).first;
+    final taskAverages = <String, double>{};
+    final avgRows = await db.rawQuery('''
+      SELECT type, COALESCE(SUM(cost), 0) / COUNT(DISTINCT chapter_id) AS avg_cost
+      FROM tasks
+      WHERE chapter_id IS NOT NULL AND type IN ('translation', 'knowledge_extraction')
+      GROUP BY type
+      ''');
+    for (final row in avgRows) {
+      taskAverages['${row['type']}'] = (row['avg_cost'] as num? ?? 0)
+          .toDouble();
+    }
+    final knowledgeCost =
+        ((await db.rawQuery('''
+      SELECT COALESCE(SUM(cost), 0) AS cost FROM tasks
+      WHERE type = 'knowledge_extraction'
+      ''')).first['cost']
+                    as num? ??
+                0)
+            .toDouble();
+    Future<int> count(String table) async =>
+        (await db.rawQuery('SELECT COUNT(*) AS n FROM $table')).first['n']
+            as int? ??
+        0;
+    final entityCount = await count('entities');
+    final relationCount = await count('entity_relations');
+    final eventCount = await count('historical_events');
+    final quality = (await db.rawQuery('''
+      SELECT COUNT(*) AS total,
+             COALESCE(SUM(CASE WHEN status = 'passed' THEN 1 ELSE 0 END), 0) AS passed
+      FROM ai_quality_reports
+      ''')).first;
+    final taskCounts = <String, int>{};
+    final taskRows = await db.rawQuery(
+      'SELECT status, COUNT(*) AS n FROM tasks GROUP BY status',
+    );
+    for (final row in taskRows) {
+      taskCounts['${row['status']}'] = row['n'] as int? ?? 0;
+    }
+    final qualityTotal = quality['total'] as int? ?? 0;
+    return AiUsageAnalytics(
+      failedRequests: totals['failed'] as int? ?? 0,
+      totalRequests: totals['total'] as int? ?? 0,
+      retryCount: totals['retries'] as int? ?? 0,
+      avgDurationMs: ((totals['avg_duration'] as num?) ?? 0).round(),
+      cacheSavedCost: (savings['saved'] as num? ?? 0).toDouble(),
+      translationAvgCost: taskAverages['translation'] ?? 0,
+      extractionAvgCost: taskAverages['knowledge_extraction'] ?? 0,
+      entityAvgCost: entityCount == 0 ? 0 : knowledgeCost / entityCount,
+      relationAvgCost: relationCount == 0 ? 0 : knowledgeCost / relationCount,
+      eventAvgCost: eventCount == 0 ? 0 : knowledgeCost / eventCount,
+      qualityPassRate: qualityTotal == 0
+          ? 0
+          : (quality['passed'] as int? ?? 0) / qualityTotal,
+      qualitySamples: qualityTotal,
+      byProvider: providerRows.map(_usageGroupFromRow).toList(),
+      runningTasks: taskCounts['running'] ?? 0,
+      queuedTasks: taskCounts['queued'] ?? 0,
+      interruptedTasks: taskCounts['interrupted'] ?? 0,
+      completedTasks:
+          (taskCounts['completed'] ?? 0) + (taskCounts['partial'] ?? 0),
     );
   }
 
@@ -1405,6 +1619,7 @@ class LocalStore {
         'cache_read_price': model.cacheReadPrice,
         'cache_write_price': model.cacheWritePrice,
         'tokenizer': model.tokenizer,
+        'prompt_caching': model.promptCaching ? 1 : 0,
         'enabled': model.enabled ? 1 : 0,
         'created_at': now,
         'updated_at': now,
@@ -1494,6 +1709,87 @@ class LocalStore {
   }
 
   // --------------------------------------------------------------- settings
+  Future<List<PromptSchemaRecord>> allSchemas() async {
+    final rows = await db.query(
+      'prompt_schemas',
+      orderBy: 'key ASC, version DESC',
+    );
+    return rows.map(PromptSchemaRecord.fromRow).toList();
+  }
+
+  Future<PromptSchemaRecord?> activeSchema(String key) async {
+    final rows = await db.query(
+      'prompt_schemas',
+      where: 'key = ? AND is_active = 1',
+      whereArgs: [key],
+      orderBy: 'version DESC',
+      limit: 1,
+    );
+    return rows.isEmpty ? null : PromptSchemaRecord.fromRow(rows.first);
+  }
+
+  Future<int> activeSchemaVersion(String key) async {
+    final schema = await activeSchema(key);
+    return schema?.version ?? 1;
+  }
+
+  Future<void> insertSchema(PromptSchemaRecord schema) async {
+    await db.insert('prompt_schemas', {
+      'id': schema.id,
+      'key': schema.key,
+      'version': schema.version,
+      'name': schema.name,
+      'description': schema.description,
+      'schema_json': schema.schemaJson,
+      'is_active': schema.isActive ? 1 : 0,
+      'created_at': schema.createdAt ?? nowIso(),
+      'updated_at': nowIso(),
+    }, conflictAlgorithm: ConflictAlgorithm.replace);
+  }
+
+  Future<void> activateSchema(String key, int version) async {
+    await db.transaction((txn) async {
+      await txn.update(
+        'prompt_schemas',
+        {'is_active': 0, 'updated_at': nowIso()},
+        where: 'key = ?',
+        whereArgs: [key],
+      );
+      await txn.update(
+        'prompt_schemas',
+        {'is_active': 1, 'updated_at': nowIso()},
+        where: 'key = ? AND version = ?',
+        whereArgs: [key, version],
+      );
+    });
+  }
+
+  Future<void> seedSchema({
+    required String key,
+    required String name,
+    required String schemaJson,
+    int version = 1,
+  }) async {
+    final existing = await db.query(
+      'prompt_schemas',
+      where: 'key = ?',
+      whereArgs: [key],
+      limit: 1,
+    );
+    if (existing.isNotEmpty) return;
+    await insertSchema(
+      PromptSchemaRecord(
+        id: newLocalId('schema'),
+        key: key,
+        version: version,
+        name: name,
+        description: '内置输出结构',
+        schemaJson: schemaJson,
+        isActive: true,
+      ),
+    );
+  }
+
   Future<String?> getSetting(String key) async {
     final rows = await db.query(
       'app_settings',

@@ -13,6 +13,31 @@ import 'ai_scheduler.dart';
 import 'prompt_defaults.dart';
 import 'tokenizer_adapter.dart';
 
+class AiFailoverConfig {
+  const AiFailoverConfig({
+    this.enabled = false,
+    this.fallbackModelId,
+    this.maxSwitches = 1,
+  });
+
+  final bool enabled;
+  final String? fallbackModelId;
+  final int maxSwitches;
+
+  Map<String, Object?> toJson() => {
+    'enabled': enabled,
+    'fallback_model_id': fallbackModelId,
+    'max_switches': maxSwitches,
+  };
+
+  factory AiFailoverConfig.fromJson(Map<String, dynamic> json) =>
+      AiFailoverConfig(
+        enabled: json['enabled'] == true,
+        fallbackModelId: json['fallback_model_id'] as String?,
+        maxSwitches: (json['max_switches'] as num?)?.toInt() ?? 1,
+      );
+}
+
 class AiNotConfiguredException implements Exception {
   AiNotConfiguredException([this.message = '尚未配置 AI 模型，请先在设置中添加服务商和模型']);
   final String message;
@@ -21,8 +46,9 @@ class AiNotConfiguredException implements Exception {
 }
 
 class AiRequestException implements Exception {
-  AiRequestException(this.message);
+  AiRequestException(this.message, {this.retryable = false});
   final String message;
+  final bool retryable;
   @override
   String toString() => message;
 }
@@ -174,6 +200,36 @@ class AiSettingsService {
       if (keys.contains(prompt.key)) continue;
       await store.insertPrompt(prompt.toRecord());
     }
+    await store.seedSchema(
+      key: 'translation',
+      name: '翻译输出 v1',
+      schemaJson:
+          '{"type":"object","required":["translations"],"properties":'
+          '{"translations":{"type":"array","items":{"type":"object",'
+          '"required":["id","text"],"properties":{"id":{"type":"integer"},'
+          '"text":{"type":"string"}}}}}}',
+    );
+    await store.seedSchema(
+      key: 'knowledge_extract',
+      name: '联合抽取输出 v2',
+      version: 2,
+      schemaJson:
+          '{"type":"object","required":["entities","relations","events"],'
+          '"properties":{"entities":{"type":"array","items":{"type":"object",'
+          '"required":["id","name","type"],"properties":{"id":{"type":"integer"},'
+          '"name":{"type":"string"},"type":{"type":"string"},'
+          '"aliases":{"type":"array"},"dynasty":{"type":["string","null"]},'
+          '"evidence":{"type":"array"}}}},"relations":{"type":"array"},'
+          '"events":{"type":"array"}}}',
+    );
+    await store.seedSchema(
+      key: 'entity_disambiguation',
+      name: '实体消歧输出 v1',
+      schemaJson:
+          '{"type":"object","required":["entity","confidence"],"properties":'
+          '{"entity":{"type":["integer","null"]},"confidence":{"type":"number"},'
+          '"reason":{"type":"string"},"merge":{"type":"boolean"}}}',
+    );
     // Older local databases may still contain the English claim categories.
     // Create a localized prompt version instead of mutating the user's history.
     final prompts = await store.allPrompts();
@@ -667,6 +723,42 @@ class AiSettingsService {
     return ResolvedAiModel(model: model, provider: provider, apiKey: key);
   }
 
+  Future<ResolvedAiModel?> resolveModelById(String modelId) async {
+    final models = await store.listModels();
+    final model = models.where((item) => item.id == modelId).firstOrNull;
+    if (model == null || !model.enabled) return null;
+    final provider = await store.getProvider(model.providerId);
+    if (provider == null || !provider.enabled) return null;
+    return ResolvedAiModel(
+      model: model,
+      provider: provider,
+      apiKey: await _readKey(provider.id),
+    );
+  }
+
+  Future<AiFailoverConfig> failoverConfig() async {
+    final raw = await store.getSetting('ai_failover');
+    if (raw == null || raw.trim().isEmpty) return const AiFailoverConfig();
+    try {
+      return AiFailoverConfig.fromJson(jsonDecode(raw) as Map<String, dynamic>);
+    } catch (_) {
+      return const AiFailoverConfig();
+    }
+  }
+
+  Future<void> saveFailoverConfig(AiFailoverConfig config) async {
+    await store.setSetting('ai_failover', jsonEncode(config.toJson()));
+  }
+
+  /// Returns a fallback model different from [primary].
+  Future<ResolvedAiModel?> failoverFallback(ResolvedAiModel primary) async {
+    final config = await failoverConfig();
+    if (!config.enabled || config.fallbackModelId == null) return null;
+    final fallback = await resolveModelById(config.fallbackModelId!);
+    if (fallback == null || fallback.model.id == primary.model.id) return null;
+    return fallback;
+  }
+
   String _keyName(String providerId) => 'guwenreader.ai.$providerId';
 
   Future<String?> activeTemplate(String key) async {
@@ -857,12 +949,33 @@ class AiSettingsService {
           .join('\n\n');
       final conversation = messages
           .where((message) => message['role'] != 'system')
+          .map((message) => Map<String, Object?>.from(message))
           .toList();
+      if (model.promptCaching && conversation.isNotEmpty) {
+        final last = conversation.last;
+        final text = '${last['content'] ?? ''}';
+        last['content'] = [
+          {
+            'type': 'text',
+            'text': text,
+            'cache_control': {'type': 'ephemeral'},
+          },
+        ];
+      }
       return {
         'model': model.name,
         'max_tokens': model.maxOutputTokens,
         'temperature': temperature,
-        if (system.isNotEmpty) 'system': system,
+        if (system.isNotEmpty)
+          'system': model.promptCaching
+              ? [
+                  {
+                    'type': 'text',
+                    'text': system,
+                    'cache_control': {'type': 'ephemeral'},
+                  },
+                ]
+              : system,
         'messages': conversation,
       };
     }
@@ -951,25 +1064,42 @@ class AiJsonClient {
     String taskType = 'other',
     int retryCount = 0,
     Future<bool> Function()? shouldCancel,
+    int? promptVersion,
+    int? schemaVersion,
   }) async {
     final resolved = await settings.resolve(purpose: purpose);
     if (resolved == null) throw AiNotConfiguredException();
-    return AiScheduler.instance.run(
-      providerId: resolved.provider.id,
-      modelId: resolved.model.id,
-      taskId: taskId,
-      priority: taskType == 'connection_test' ? 60 : 20,
-      action: () => _performChat(
-        resolved: resolved,
-        prompt: prompt,
-        jsonMode: jsonMode,
-        temperature: temperature,
+    Future<String> run(ResolvedAiModel model, {String? from, String? reason}) {
+      return AiScheduler.instance.run(
+        providerId: model.provider.id,
+        modelId: model.model.id,
         taskId: taskId,
-        taskType: taskType,
-        retryCount: retryCount,
-        shouldCancel: shouldCancel,
-      ),
-    );
+        priority: taskType == 'connection_test' ? 60 : 20,
+        action: () => _performChat(
+          resolved: model,
+          prompt: prompt,
+          jsonMode: jsonMode,
+          temperature: temperature,
+          taskId: taskId,
+          taskType: taskType,
+          retryCount: retryCount,
+          shouldCancel: shouldCancel,
+          promptVersion: promptVersion,
+          schemaVersion: schemaVersion,
+          failoverFromModel: from,
+          failoverReason: reason,
+        ),
+      );
+    }
+
+    try {
+      return await run(resolved);
+    } on AiRequestException catch (error) {
+      if (!error.retryable) rethrow;
+      final fallback = await settings.failoverFallback(resolved);
+      if (fallback == null) rethrow;
+      return run(fallback, from: resolved.label, reason: error.message);
+    }
   }
 
   Future<String> _performChat({
@@ -981,6 +1111,10 @@ class AiJsonClient {
     required String taskType,
     required int retryCount,
     required Future<bool> Function()? shouldCancel,
+    int? promptVersion,
+    int? schemaVersion,
+    String? failoverFromModel,
+    String? failoverReason,
   }) async {
     final dio = Dio(
       BaseOptions(
@@ -1034,8 +1168,14 @@ class AiJsonClient {
             status: success ? 'success' : 'failed',
             error: success ? null : 'AI 服务返回了空响应',
             retryCount: attempt,
+            promptVersion: promptVersion,
+            schemaVersion: schemaVersion,
+            failoverFromModel: failoverFromModel,
+            failoverReason: failoverReason,
           );
-          if (!success) throw AiRequestException('AI 服务返回了空响应');
+          if (!success) {
+            throw AiRequestException('AI 服务返回了空响应', retryable: true);
+          }
           return text;
         } on DioException catch (error) {
           stopwatch.stop();
@@ -1050,14 +1190,21 @@ class AiJsonClient {
             status: 'failed',
             error: _dioMessage(error),
             retryCount: attempt,
+            promptVersion: promptVersion,
+            schemaVersion: schemaVersion,
+            failoverFromModel: failoverFromModel,
+            failoverReason: failoverReason,
           );
           if (attempt >= maxAttempts - 1 || !_isRetryable(error)) {
-            throw AiRequestException(_dioMessage(error));
+            throw AiRequestException(
+              _dioMessage(error),
+              retryable: _isRetryable(error),
+            );
           }
           await Future<void>.delayed(_retryDelay(error, attempt, config));
         }
       }
-      throw AiRequestException('AI 请求重试次数已用尽');
+      throw AiRequestException('AI 请求重试次数已用尽', retryable: true);
     } finally {
       dio.close();
     }
@@ -1097,6 +1244,8 @@ class AiJsonClient {
     String taskType = 'other',
     int retryCount = 0,
     Future<bool> Function()? shouldCancel,
+    int? promptVersion,
+    int? schemaVersion,
   }) async {
     final text = await chat(
       purpose: purpose,
@@ -1107,6 +1256,8 @@ class AiJsonClient {
       taskType: taskType,
       retryCount: retryCount,
       shouldCancel: shouldCancel,
+      promptVersion: promptVersion,
+      schemaVersion: schemaVersion,
     );
     return parseJsonObject(text);
   }
@@ -1125,6 +1276,10 @@ class AiJsonClient {
     required String status,
     required String? error,
     required int retryCount,
+    int? promptVersion,
+    int? schemaVersion,
+    String? failoverFromModel,
+    String? failoverReason,
   }) async {
     final tokenizer = TokenizerRegistry.forModel(resolved.model);
     final estimated = reported == null;
@@ -1163,6 +1318,10 @@ class AiJsonClient {
       retryCount: retryCount,
       isEstimated: estimated,
       tokenSource: tokenSource,
+      promptVersion: promptVersion,
+      schemaVersion: schemaVersion,
+      failoverFromModel: failoverFromModel,
+      failoverReason: failoverReason,
     );
   }
 
@@ -1204,7 +1363,18 @@ class AiJsonClient {
         'max_tokens': resolved.model.maxOutputTokens,
         'temperature': temperature,
         'messages': [
-          {'role': 'user', 'content': prompt},
+          {
+            'role': 'user',
+            'content': resolved.model.promptCaching
+                ? [
+                    {
+                      'type': 'text',
+                      'text': prompt,
+                      'cache_control': {'type': 'ephemeral'},
+                    },
+                  ]
+                : prompt,
+          },
         ],
       };
     }

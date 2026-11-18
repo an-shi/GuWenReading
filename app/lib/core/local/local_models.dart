@@ -50,6 +50,7 @@ class AiModelRecord {
     this.cacheReadPrice = 0,
     this.cacheWritePrice = 0,
     this.tokenizer,
+    this.promptCaching = false,
     this.enabled = true,
   });
 
@@ -77,6 +78,7 @@ class AiModelRecord {
   /// `qwen`, `deepseek`, `anthropic`, `gemini`. Unknown values fall back to
   /// the model-name heuristic.
   final String? tokenizer;
+  final bool promptCaching;
   final bool enabled;
 
   bool supports(String capability) => capabilities.contains(capability);
@@ -99,8 +101,43 @@ class AiModelRecord {
     cacheReadPrice: (row['cache_read_price'] as num? ?? 0).toDouble(),
     cacheWritePrice: (row['cache_write_price'] as num? ?? 0).toDouble(),
     tokenizer: row['tokenizer'] as String?,
+    promptCaching: (row['prompt_caching'] as int? ?? 0) == 1,
     enabled: (row['enabled'] as int? ?? 1) == 1,
   );
+}
+
+class PromptSchemaRecord {
+  const PromptSchemaRecord({
+    required this.id,
+    required this.key,
+    required this.version,
+    required this.name,
+    this.description,
+    this.schemaJson = '{}',
+    this.isActive = false,
+    this.createdAt,
+  });
+
+  final String id;
+  final String key;
+  final int version;
+  final String name;
+  final String? description;
+  final String schemaJson;
+  final bool isActive;
+  final String? createdAt;
+
+  factory PromptSchemaRecord.fromRow(Map<String, Object?> row) =>
+      PromptSchemaRecord(
+        id: row['id'] as String,
+        key: row['key'] as String,
+        version: row['version'] as int? ?? 1,
+        name: row['name'] as String? ?? '',
+        description: row['description'] as String?,
+        schemaJson: row['schema_json'] as String? ?? '{}',
+        isActive: (row['is_active'] as int? ?? 0) == 1,
+        createdAt: row['created_at'] as String?,
+      );
 }
 
 class PromptRecord {
@@ -298,6 +335,8 @@ class AiUsageRecord {
     this.modelId,
     this.modelName,
     this.retryCount = 0,
+    this.promptVersion,
+    this.schemaVersion,
     this.error,
   });
 
@@ -319,6 +358,8 @@ class AiUsageRecord {
   final int retryCount;
   final bool isEstimated;
   final String tokenSource;
+  final int? promptVersion;
+  final int? schemaVersion;
   final String? error;
   final String createdAt;
 
@@ -341,6 +382,8 @@ class AiUsageRecord {
     retryCount: row['retry_count'] as int? ?? 0,
     isEstimated: (row['is_estimated'] as int? ?? 0) == 1,
     tokenSource: row['token_source'] as String? ?? 'provider_actual',
+    promptVersion: row['prompt_version'] as int?,
+    schemaVersion: row['schema_version'] as int?,
     error: row['error'] as String?,
     createdAt: row['created_at'] as String? ?? '',
   );
@@ -364,6 +407,46 @@ class AiUsageGroup {
   final int cacheReadTokens;
   final int cacheWriteTokens;
   final double cost;
+}
+
+class AiUsageAnalytics {
+  const AiUsageAnalytics({
+    this.failedRequests = 0,
+    this.totalRequests = 0,
+    this.retryCount = 0,
+    this.avgDurationMs = 0,
+    this.cacheSavedCost = 0,
+    this.translationAvgCost = 0,
+    this.extractionAvgCost = 0,
+    this.entityAvgCost = 0,
+    this.relationAvgCost = 0,
+    this.eventAvgCost = 0,
+    this.qualityPassRate = 0,
+    this.qualitySamples = 0,
+    this.byProvider = const [],
+    this.runningTasks = 0,
+    this.queuedTasks = 0,
+    this.interruptedTasks = 0,
+    this.completedTasks = 0,
+  });
+
+  final int failedRequests;
+  final int totalRequests;
+  final int retryCount;
+  final int avgDurationMs;
+  final double cacheSavedCost;
+  final double translationAvgCost;
+  final double extractionAvgCost;
+  final double entityAvgCost;
+  final double relationAvgCost;
+  final double eventAvgCost;
+  final double qualityPassRate;
+  final int qualitySamples;
+  final List<AiUsageGroup> byProvider;
+  final int runningTasks;
+  final int queuedTasks;
+  final int interruptedTasks;
+  final int completedTasks;
 }
 
 class AiUsageSummary {

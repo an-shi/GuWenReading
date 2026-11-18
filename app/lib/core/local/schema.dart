@@ -181,6 +181,7 @@ const List<String> schemaStatements = [
     art_name TEXT,
     offices TEXT NOT NULL DEFAULT '[]',
     status TEXT NOT NULL DEFAULT 'pending',
+    knowledge_type TEXT NOT NULL DEFAULT 'explicit',
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
   )
@@ -196,6 +197,13 @@ const List<String> schemaStatements = [
     sentence_id TEXT,
     quote TEXT NOT NULL,
     status TEXT NOT NULL DEFAULT 'pending',
+    chunk_index INTEGER,
+    task_id TEXT,
+    provider_id TEXT,
+    model_id TEXT,
+    prompt_version INTEGER,
+    schema_version INTEGER,
+    extracted_at TEXT,
     created_at TEXT NOT NULL
   )
   ''',
@@ -209,6 +217,7 @@ const List<String> schemaStatements = [
     label TEXT,
     description TEXT,
     status TEXT NOT NULL DEFAULT 'inferred',
+    knowledge_type TEXT NOT NULL DEFAULT 'inferred',
     confidence REAL NOT NULL DEFAULT 0.5,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
@@ -223,7 +232,14 @@ const List<String> schemaStatements = [
     sentence_id TEXT,
     book_id TEXT,
     chapter_id TEXT,
-    quote TEXT NOT NULL
+    quote TEXT NOT NULL,
+    chunk_index INTEGER,
+    task_id TEXT,
+    provider_id TEXT,
+    model_id TEXT,
+    prompt_version INTEGER,
+    schema_version INTEGER,
+    extracted_at TEXT
   )
   ''',
   '''
@@ -239,6 +255,7 @@ const List<String> schemaStatements = [
     time_precision TEXT NOT NULL DEFAULT 'unknown',
     time_note TEXT,
     status TEXT NOT NULL DEFAULT 'extracted',
+    knowledge_type TEXT NOT NULL DEFAULT 'inferred',
     fingerprint TEXT,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
@@ -261,7 +278,14 @@ const List<String> schemaStatements = [
     sentence_id TEXT,
     book_id TEXT,
     chapter_id TEXT,
-    quote TEXT NOT NULL
+    quote TEXT NOT NULL,
+    chunk_index INTEGER,
+    task_id TEXT,
+    provider_id TEXT,
+    model_id TEXT,
+    prompt_version INTEGER,
+    schema_version INTEGER,
+    extracted_at TEXT
   )
   ''',
   '''
@@ -325,6 +349,7 @@ const List<String> schemaStatements = [
     cache_read_price REAL NOT NULL DEFAULT 0,
     cache_write_price REAL NOT NULL DEFAULT 0,
     tokenizer TEXT,
+    prompt_caching INTEGER NOT NULL DEFAULT 0,
     enabled INTEGER NOT NULL DEFAULT 1,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
@@ -393,6 +418,10 @@ const List<String> schemaStatements = [
     retry_count INTEGER NOT NULL DEFAULT 0,
     is_estimated INTEGER NOT NULL DEFAULT 0,
     token_source TEXT NOT NULL DEFAULT 'provider_actual',
+    prompt_version INTEGER,
+    schema_version INTEGER,
+    failover_from_model TEXT,
+    failover_reason TEXT,
     error TEXT,
     created_at TEXT NOT NULL
   )
@@ -465,4 +494,70 @@ const List<String> schemaStatements = [
   'CREATE INDEX IF NOT EXISTS idx_budget_book ON ai_budget_reservations(book_id, released)',
   'CREATE INDEX IF NOT EXISTS idx_budget_chapter ON ai_budget_reservations(chapter_id, released)',
   'CREATE INDEX IF NOT EXISTS idx_budget_created ON ai_budget_reservations(created_at, released)',
+  '''
+  CREATE TABLE IF NOT EXISTS ai_quality_reports (
+    id TEXT PRIMARY KEY,
+    task_id TEXT,
+    scope TEXT NOT NULL,
+    reference TEXT,
+    status TEXT NOT NULL,
+    issues_json TEXT NOT NULL DEFAULT '[]',
+    created_at TEXT NOT NULL
+  )
+  ''',
+  'CREATE INDEX IF NOT EXISTS idx_quality_task ON ai_quality_reports(task_id, created_at DESC)',
+  '''
+  CREATE TABLE IF NOT EXISTS entity_disambiguations (
+    id TEXT PRIMARY KEY,
+    task_id TEXT,
+    extracted_name TEXT NOT NULL,
+    kind TEXT,
+    dynasty TEXT,
+    candidate_ids TEXT NOT NULL DEFAULT '[]',
+    chosen_entity_id TEXT,
+    status TEXT NOT NULL,
+    confidence REAL NOT NULL DEFAULT 0,
+    reason TEXT,
+    model_id TEXT,
+    created_at TEXT NOT NULL
+  )
+  ''',
+  'CREATE INDEX IF NOT EXISTS idx_disambiguation_task ON entity_disambiguations(task_id, created_at DESC)',
+  'CREATE INDEX IF NOT EXISTS idx_disambiguation_status ON entity_disambiguations(status, created_at DESC)',
+  '''
+  CREATE TABLE IF NOT EXISTS entity_disambiguation_cache (
+    cache_key TEXT PRIMARY KEY,
+    result_json TEXT NOT NULL,
+    created_at TEXT NOT NULL
+  )
+  ''',
+  '''
+  CREATE TABLE IF NOT EXISTS prompt_schemas (
+    id TEXT PRIMARY KEY,
+    key TEXT NOT NULL,
+    version INTEGER NOT NULL,
+    name TEXT NOT NULL,
+    description TEXT,
+    schema_json TEXT NOT NULL DEFAULT '{}',
+    is_active INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    UNIQUE(key, version)
+  )
+  ''',
+  'CREATE INDEX IF NOT EXISTS idx_schemas_key ON prompt_schemas(key, version DESC)',
+  '''
+  CREATE TABLE IF NOT EXISTS knowledge_review_events (
+    id TEXT PRIMARY KEY,
+    target_type TEXT NOT NULL,
+    target_id TEXT NOT NULL,
+    action TEXT NOT NULL,
+    before_json TEXT,
+    after_json TEXT,
+    source TEXT NOT NULL DEFAULT 'human',
+    task_id TEXT,
+    created_at TEXT NOT NULL
+  )
+  ''',
+  'CREATE INDEX IF NOT EXISTS idx_review_target ON knowledge_review_events(target_type, target_id, created_at DESC)',
 ];

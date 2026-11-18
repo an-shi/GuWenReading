@@ -42,6 +42,7 @@
 | --- | --- | --- |
 | `translation` | 文言文翻译（均衡） | 章节分批翻译，返回 JSON 译文；请求内使用短整数索引 |
 | `knowledge_extract` | 联合知识抽取 | 一次返回实体、关系和历史事件，按块处理，证据使用句子短索引 |
+| `entity_disambiguation` | 实体消歧 | 在最多 5 个本地候选中判断是否合并，返回候选 ID、置信度和理由 |
 | `sentence_explain` | 句子释义 | 难词、句式、典故与含义 |
 | `entity_extract` | 历史人物与实体抽取 | 旧版独立实体提示词，保留用于兼容/自定义 |
 | `relation_extract` | 人物关系抽取 | 旧版独立关系提示词，保留用于兼容/自定义 |
@@ -76,8 +77,11 @@
 - `translation_cache`：批次级完整提示词缓存。
 - `knowledge_chunk_cache`：知识抽取块级缓存，Key 包含章节、块索引、内容 Hash、模型、Prompt 版本和 Schema 版本。
 - `knowledge_extraction_state`：章节级抽取状态，用于跳过未变化章节。
-- `ai_usage`：每次 AI 请求的 Token、缓存 Token、费用、耗时、状态和估算标记。
+- `ai_usage`：每次 AI 请求的 Token、缓存 Token、费用、耗时、状态、估算标记、Prompt/Schema 版本和故障切换信息。
 - `tasks`：聚合本任务的 Token、费用、请求次数。
+- `prompt_schemas`：每个 Prompt 对应的输出 Schema 版本；缓存 Key 和 `ai_usage` 都记录实际版本。
+- `ai_quality_reports`：本地质量检查结果。
+- `knowledge_review_events`：人工审核和修改审计。
 
 费用按模型配置的每百万 Token 单价计算；没有真实 usage 时使用保守估算并标记为估算。详见 [AI_PIPELINE_COSTS.md](AI_PIPELINE_COSTS.md)。
 

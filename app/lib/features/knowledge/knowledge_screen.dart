@@ -194,6 +194,8 @@ class _EntityCard extends StatelessWidget {
                         ),
                         const SizedBox(width: 6),
                         _StatusPill(status: entity.status),
+                        const SizedBox(width: 5),
+                        _KnowledgeTypePill(type: entity.knowledgeType),
                       ],
                     ),
                     const SizedBox(height: 3),
@@ -319,6 +321,8 @@ class _EventCard extends StatelessWidget {
                   ),
                   const SizedBox(width: 7),
                   _StatusPill(status: event.status),
+                  const SizedBox(width: 5),
+                  _KnowledgeTypePill(type: event.knowledgeType),
                   const Spacer(),
                   if (event.timeStartYear != null)
                     Text(
@@ -402,6 +406,33 @@ String _entityKindLabel(String kind) => switch (kind) {
   _ => kind,
 };
 
+class _KnowledgeTypePill extends StatelessWidget {
+  const _KnowledgeTypePill({required this.type});
+
+  final String type;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final (label, color) = switch (type) {
+      'explicit' => ('原文明确', theme.colorScheme.primary),
+      'cross_source_supported' => ('多源支持', theme.colorScheme.secondary),
+      'disputed' => ('存在争议', theme.colorScheme.error),
+      'human_verified' => ('人工确认', theme.colorScheme.primary),
+      _ => ('AI 推断', theme.colorScheme.tertiary),
+    };
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+      decoration: BoxDecoration(
+        color: color.withValues(alpha: 0.07),
+        borderRadius: BorderRadius.circular(5),
+        border: Border.all(color: color.withValues(alpha: 0.25)),
+      ),
+      child: Text(label, style: TextStyle(fontSize: 9, color: color)),
+    );
+  }
+}
+
 class _StatusPill extends StatelessWidget {
   const _StatusPill({required this.status});
   final String status;
@@ -439,6 +470,14 @@ class EntityDetailScreen extends ConsumerWidget {
         actions: [
           PopupMenuButton<String>(
             onSelected: (value) async {
+              if (value == '__merge') {
+                await _mergeIntoOther(context, ref);
+                return;
+              }
+              if (value == '__history') {
+                await _showReviewHistory(context, ref);
+                return;
+              }
               await ref
                   .read(knowledgeServiceProvider)
                   .setEntityStatus(entityId, value);
@@ -449,6 +488,9 @@ class EntityDetailScreen extends ConsumerWidget {
               PopupMenuItem(value: 'confirmed', child: Text('确认收录')),
               PopupMenuItem(value: 'pending', child: Text('标记待审')),
               PopupMenuItem(value: 'rejected', child: Text('驳回')),
+              PopupMenuDivider(),
+              PopupMenuItem(value: '__merge', child: Text('合并到其他人物')),
+              PopupMenuItem(value: '__history', child: Text('审核与修改记录')),
             ],
           ),
         ],
@@ -497,6 +539,8 @@ class EntityDetailScreen extends ConsumerWidget {
                           ),
                           const SizedBox(width: 7),
                           _StatusPill(status: entity.status),
+                          const SizedBox(width: 5),
+                          _KnowledgeTypePill(type: entity.knowledgeType),
                         ],
                       ),
                       const SizedBox(height: 4),
@@ -566,6 +610,90 @@ class EntityDetailScreen extends ConsumerWidget {
       ),
     );
   }
+
+  Future<void> _mergeIntoOther(BuildContext context, WidgetRef ref) async {
+    final entities = await ref.read(knowledgeServiceProvider).listEntities();
+    if (!context.mounted) return;
+    final candidates = entities.where((item) => item.id != entityId).toList();
+    if (candidates.isEmpty) {
+      ScaffoldMessenger.of(context)
+          .showSnackBar(const SnackBar(content: Text('没有可合并的其他人物')));
+      return;
+    }
+    final target = await showDialog<HistoricalEntity>(
+      context: context,
+      builder: (context) => SimpleDialog(
+        title: const Text('合并到已有实体'),
+        children: [
+          for (final item in candidates.take(200))
+            SimpleDialogOption(
+              onPressed: () => Navigator.pop(context, item),
+              child: Text(
+                [
+                  item.name,
+                  item.dynasty,
+                  _entityKindLabel(item.kind),
+                ].whereType<String>().join(' · '),
+              ),
+            ),
+        ],
+      ),
+    );
+    if (target == null || !context.mounted) return;
+    await ref.read(knowledgeServiceProvider).mergeEntities(target.id, [
+      entityId,
+    ]);
+    ref.invalidate(entitiesProvider);
+    ref.invalidate(entityProvider(target.id));
+    if (context.mounted) Navigator.pop(context);
+  }
+
+  Future<void> _showReviewHistory(BuildContext context, WidgetRef ref) async {
+    final rows = await ref
+        .read(knowledgeServiceProvider)
+        .reviewHistory(targetType: 'entity', targetId: entityId);
+    if (!context.mounted) return;
+    await showDialog<void>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('审核与修改记录'),
+        content: SizedBox(
+          width: 620,
+          height: 420,
+          child: rows.isEmpty
+              ? const Center(child: Text('暂无记录'))
+              : ListView.builder(
+                  itemCount: rows.length,
+                  itemBuilder: (context, index) {
+                    final row = rows[index];
+                    return ListTile(
+                      dense: true,
+                      title: Text('${row['action']}'),
+                      subtitle: Text('${row['created_at']} · ${row['source']}'),
+                      trailing: TextButton(
+                        onPressed: () async {
+                          await ref
+                              .read(knowledgeServiceProvider)
+                              .undoReview(row['id'] as String);
+                          ref.invalidate(entityProvider(entityId));
+                          ref.invalidate(entitiesProvider);
+                          if (context.mounted) Navigator.pop(context);
+                        },
+                        child: const Text('撤销'),
+                      ),
+                    );
+                  },
+                ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: const Text('关闭'),
+          ),
+        ],
+      ),
+    );
+  }
 }
 
 class _RelationCard extends ConsumerWidget {
@@ -596,6 +724,8 @@ class _RelationCard extends ConsumerWidget {
                     ? 'confirmed'
                     : 'pending',
               ),
+              const SizedBox(width: 5),
+              _KnowledgeTypePill(type: relation.knowledgeType),
               const SizedBox(width: 6),
               Text(
                 relation.relationType,
@@ -780,6 +910,8 @@ class EventDetailScreen extends ConsumerWidget {
                 ),
                 const SizedBox(width: 7),
                 _StatusPill(status: event.status),
+                const SizedBox(width: 5),
+                _KnowledgeTypePill(type: event.knowledgeType),
               ],
             ),
             const SizedBox(height: 10),

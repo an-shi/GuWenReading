@@ -515,6 +515,99 @@ cache_read_price, cache_write_price
 - 新缓存表可重建；正式翻译/知识数据不会因缓存清理而丢失。
 - 旧任务没有 Token 字段，显示为 0，也不会被启动恢复流程重复处理。
 
+## 5.5 质量检查、知识可信度与人工审核
+
+### 5.5.1 本地质量检查
+
+`quality_service.dart` 在本地检查，不额外调用 AI：
+
+- 翻译：缺失索引、空译文、原文未翻译、译文过长/过短、占位符、重复译文、未翻译比例。
+- 知识：实体 ID 重复/缺失、关系端点不存在、关系类型为空、关系/事件缺少证据、年份异常、重复关系。
+- 结果状态：`passed / warning / needs_review / failed`，写入 `ai_quality_reports`，任务结果和任务中心统计。
+
+失败或待审核结果不会删除原文或已有知识；只影响质量标记与统计。
+
+### 5.5.2 可信度类型
+
+`entities`、`entity_relations`、`historical_events` 均增加 `knowledge_type`：
+
+- `explicit`：原文明确。
+- `inferred`：AI 推断（关系和事件默认）。
+- `cross_source_supported`：至少两个不同 `book_id` 的证据。
+- `disputed`：人工驳回或标记争议。
+- `human_verified`：人工确认。
+
+人工确认/驳回会同步更新可信度类型；AI 后续抽取不会把 `human_verified` 自动改回普通类型。
+
+### 5.5.3 来源追踪
+
+`entity_mentions / relation_sources / event_sources` 增加：
+
+- `chunk_index`
+- `task_id`
+- `provider_id`
+- `model_id`
+- `prompt_version`
+- `schema_version`
+- `extracted_at`
+
+因此每条关系/事件都能追溯到任务、模型、Prompt/Schema 版本、章节、句子和原文引用。
+
+### 5.5.4 多候选实体消歧
+
+`knowledge_service.dart` 采用三级匹配：
+
+1. 本地精确名称/别名匹配。
+2. 本地评分（规范化名称、类型、别名包含关系）。
+3. 多个高分候选时调用 `entity_disambiguation` Prompt，只发送最多 5 个候选。
+
+结果写入 `entity_disambiguations`：
+
+- `auto_matched`：AI 置信度 ≥ 0.8 且选择候选。
+- `pending_review`：低置信度或 AI 无法确定。
+- `unresolved`：明确无法匹配。
+
+低置信度不会强行合并，而是创建独立实体并保留候选记录；消歧请求和缓存分别记录 `entity_disambiguation` 用量与 `entity_disambiguation_cache`。
+
+### 5.5.5 人工审核与撤销
+
+`knowledge_review_events` 记录：
+
+- 确认/驳回状态。
+- 实体、关系、事件字段修改。
+- 合并、拆分。
+- 撤销操作。
+
+`undoReview(auditId)` 可恢复该条记录的 `before_json` 字段；合并会保留全部提及、关系证据和事件参与者，并自动合并重复关系/参与者。人工确认结果不会被后续自动抽取覆盖。
+
+## 5.6 Prompt / Schema 版本与故障切换
+
+### 5.6.1 Prompt / Schema 版本
+
+- Prompt 仍保存在 `prompt_templates`，支持新建、启用和对比历史版本。
+- Schema 保存在 `prompt_schemas`，内置翻译、联合抽取、实体消歧三个 Schema。
+- 翻译/知识抽取/消歧的缓存 Key 都包含实际启用的 Prompt 版本和 Schema 版本。
+- 每次 `ai_usage` 记录 `prompt_version` 和 `schema_version`。
+- 启用新版本不会删除旧数据，也不会自动让所有缓存失效；只影响后续请求。
+
+### 5.6.2 Provider 故障切换
+
+- `ai_failover` 配置保存在 `app_settings`，包含备用模型和最大切换次数。
+- 仅对超时、429、5xx 等可恢复错误切换；401/403/404/400 等配置错误直接返回。
+- 切换后的请求使用实际备用 Provider/模型计费。
+- `ai_usage` 记录 `failover_from_model` 和 `failover_reason`。
+- 缓存 Key 使用实际模型，避免把主模型结果写到备用模型缓存中。
+
+### 5.6.3 请求可观测性
+
+任务中心新增成本与质量分析：
+
+- 累计费用、输入/输出/缓存 Token、缓存节省费用。
+- 成功/失败/重试、平均耗时。
+- 按 Provider、模型、任务类型统计。
+- 每章平均翻译/抽取成本，每实体/关系/事件平均成本。
+- 质量检查通过率、当前运行/排队/中断任务数。
+
 ## 6. 测试与实测
 
 自动化测试：
@@ -572,11 +665,14 @@ cache_read_price, cache_write_price
 
 ### 7.2 Prompt Caching
 
-固定规则已经在 Prompt 前部、动态原文在后部，但应用没有显式发送 Provider 的缓存控制字段。部分 Provider 会自动做前缀缓存；是否命中取决于其规则。后续可对支持的 Provider 增加缓存标记并记录缓存读写 Token。
+- Anthropic：模型启用 `prompt_caching` 后，请求以 `cache_control: ephemeral` 标记 system 和最后一条用户消息。
+- OpenAI / OpenAI 兼容：依赖服务商自动前缀缓存，不发送私有字段。
+- Gemini：暂未接入 cached contents API。
+- 缓存读写 Token 来自 Provider usage；本地业务缓存与 Provider 缓存分开统计。
 
 ### 7.3 Batch API
 
-尚未实现。整本书翻译/抽取非常适合异步 Batch API，可在不改变现有实时流程的前提下作为可选任务类型。
+尚未实现。Provider Batch API 的文件上传、任务状态、结果文件和计费规则差异较大，当前版本继续使用实时接口；不会把普通并发请求伪装成 Batch。
 
 ### 7.4 预算粒度
 
@@ -588,7 +684,7 @@ cache_read_price, cache_write_price
 
 ### 7.6 实体消歧
 
-当前只做本地精确/别名匹配，没有多候选 AI 消歧。若未来加入，应只在候选冲突时调用，并记录额外费用。
+已实现本地精确/别名/评分匹配，并在多候选冲突时调用 AI。AI 只能从最多 5 个本地候选中选择；低置信度结果创建独立实体并进入待审核。缓存 Key 包含候选集合、模型、Prompt 和 Schema 版本。
 
 ### 7.7 事件指纹
 
@@ -634,7 +730,13 @@ cache_read_price, cache_write_price
 - [x] 模型级 Tokenizer Adapter 与来源标记（provider_actual/local_tokenizer/local_estimate）
 - [x] 翻译批次与知识分块统一使用 Tokenizer 预算
 - [ ] 内置各厂商精确 BPE 词表
-- [ ] Provider 原生 Prompt Caching
+- [ ] Provider 原生 Prompt Caching（已支持 Anthropic 显式标记，Gemini 待接入）
 - [ ] Batch API
-- [ ] 多候选实体 AI 消歧
+- [x] 多候选实体 AI 消歧
 - [x] 备份 AI 用量、任务与缓存（完整/轻量）
+- [x] 本地翻译/知识质量检查与异常报告
+- [x] 知识可信度类型与完整来源追踪
+- [x] 人工审核、合并/拆分、撤销与审计
+- [x] Prompt/Schema 版本管理与请求版本记录
+- [x] Provider 故障切换与切换原因记录
+- [x] 成本、缓存节省、成功率和质量通过率分析

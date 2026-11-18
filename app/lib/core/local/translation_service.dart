@@ -12,6 +12,7 @@ import 'ai_service.dart';
 import 'budget_service.dart';
 import 'local_models.dart';
 import 'local_store.dart';
+import 'quality_service.dart';
 import 'tokenizer_adapter.dart';
 
 class TranslationService {
@@ -20,12 +21,15 @@ class TranslationService {
     required this.aiSettings,
     required this.client,
     BudgetService? budgets,
-  }) : budgets = budgets ?? BudgetService(store: store);
+    QualityService? quality,
+  }) : budgets = budgets ?? BudgetService(store: store),
+       quality = quality ?? const QualityService();
 
   final LocalStore store;
   final AiSettingsService aiSettings;
   final AiJsonClient client;
   final BudgetService budgets;
+  final QualityService quality;
 
   static const _cachePolicyVersion = 2;
 
@@ -141,6 +145,7 @@ class TranslationService {
       return;
     }
     final promptVersion = await aiSettings.activePromptVersion('translation');
+    final schemaVersion = await store.activeSchemaVersion('translation');
     final allSentences = content.paragraphs
         .expand((paragraph) => paragraph.sentences)
         .toList();
@@ -167,6 +172,8 @@ class TranslationService {
     var failed = 0;
     var cached = 0;
     var batchCount = 0;
+    var qualityWarnings = 0;
+    var qualityReviews = 0;
 
     final pending = <Sentence>[];
     final cacheKeys = <String, String>{};
@@ -176,6 +183,7 @@ class TranslationService {
         content,
         resolved.label,
         promptVersion,
+        schemaVersion,
       );
       cacheKeys[sentence.id] = cacheKey;
       final cachedText = await store.translationSentenceCache(cacheKey);
@@ -255,7 +263,8 @@ class TranslationService {
         final cacheKey = sha256
             .convert(
               utf8.encode(
-                '${resolved.label}|v$promptVersion|p$_cachePolicyVersion|$prompt',
+                '${resolved.label}|v$promptVersion|s$schemaVersion|'
+                'p$_cachePolicyVersion|$prompt',
               ),
             )
             .toString();
@@ -278,6 +287,8 @@ class TranslationService {
             prompt: prompt,
             taskId: taskId,
             taskType: 'translation',
+            promptVersion: promptVersion,
+            schemaVersion: schemaVersion,
             shouldCancel: () async {
               final current = await store.getTask(taskId);
               return current == null ||
@@ -303,6 +314,26 @@ class TranslationService {
           byId[index] = text.trim();
         }
         if (fromBatchCache) cached += byId.length;
+        final report = quality.checkTranslations(
+          translations: byId,
+          originals: {
+            for (final entry in localById.entries)
+              entry.key: entry.value.originalText,
+          },
+        );
+        await store.recordQualityReport(
+          taskId: taskId,
+          scope: 'translation_batch',
+          reference: 'batch:$batchCount',
+          status: report.level.wireValue,
+          issues: report.issues.map((issue) => issue.toJson()).toList(),
+        );
+        if (report.level == QualityLevel.failed ||
+            report.level == QualityLevel.needsReview) {
+          qualityReviews += 1;
+        } else if (report.level == QualityLevel.warning) {
+          qualityWarnings += 1;
+        }
         for (final entry in localById.entries) {
           final sentence = entry.value;
           final text = byId[entry.key];
@@ -370,6 +401,8 @@ class TranslationService {
         'completed': completed,
         'failed': failed,
         'cached': cached,
+        'quality_warnings': qualityWarnings,
+        'quality_reviews': qualityReviews,
         'model': resolved.label,
       },
     );
@@ -430,6 +463,7 @@ class TranslationService {
     ChapterContent content,
     String modelLabel,
     int promptVersion,
+    int schemaVersion,
   ) {
     final sourceHash = sha256
         .convert(utf8.encode(sentence.originalText))
@@ -438,7 +472,7 @@ class TranslationService {
         .convert(
           utf8.encode(
             '$sourceHash|${_contextHash(content, sentence)}|$modelLabel|'
-            'v$promptVersion|p$_cachePolicyVersion',
+            'v$promptVersion|s$schemaVersion|p$_cachePolicyVersion',
           ),
         )
         .toString();
@@ -561,6 +595,7 @@ class TranslationService {
     final resolved = await aiSettings.resolve(purpose: 'translation');
     if (resolved == null) throw TranslationException('尚未配置默认翻译模型');
     final promptVersion = await aiSettings.activePromptVersion('translation');
+    final schemaVersion = await store.activeSchemaVersion('translation');
     final content = await store.chapterContent(row['chapter_id'] as String);
     final sentence = content?.paragraphs
         .expand((paragraph) => paragraph.sentences)
@@ -572,6 +607,7 @@ class TranslationService {
         content,
         resolved.label,
         promptVersion,
+        schemaVersion,
       );
       final cachedText = await store.translationSentenceCache(cacheKey);
       if (cachedText != null && cachedText.trim().isNotEmpty) {
@@ -604,6 +640,8 @@ class TranslationService {
       purpose: 'translation',
       prompt: prompt,
       taskType: 'translation',
+      promptVersion: promptVersion,
+      schemaVersion: schemaVersion,
     );
     final translations = jsonList(data['translations']).isNotEmpty
         ? jsonList(data['translations'])
@@ -646,6 +684,7 @@ class TranslationService {
           content,
           resolved.label,
           promptVersion,
+          schemaVersion,
         ),
         modelLabel: resolved.label,
         promptVersion: promptVersion,

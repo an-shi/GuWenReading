@@ -67,6 +67,11 @@
 - `knowledge_extraction_state`：章节级抽取状态，用于内容/模型/Prompt/Schema 未变时跳过 API。
 - `ai_budget_limits`：全局每日/每月、书籍、章节、任务预算上限。
 - `ai_budget_reservations`：任务启动前预留、运行中收缩、结束时释放的预算记录。
+- `ai_quality_reports`：翻译/知识输出质量检查结果。
+- `entity_disambiguations`：实体消歧候选、结论、置信度、理由和状态。
+- `entity_disambiguation_cache`：按候选集合、模型、Prompt、Schema 版本缓存消歧结果。
+- `knowledge_review_events`：人工审核、修改、合并、拆分和撤销审计。
+- `prompt_schemas`：输出 JSON Schema 的版本与启用状态。
 - `prompt_templates`：提示词 key、版本、名称、说明、模板、变量、激活状态。
 - `assistant_sessions` / `assistant_messages`：AI 助手会话与消息、引用、claims。
 - `app_settings`：本地键值设置。

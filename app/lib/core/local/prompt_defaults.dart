@@ -29,6 +29,31 @@ class DefaultPrompt {
 
 const defaultPrompts = <DefaultPrompt>[
   DefaultPrompt(
+    key: 'entity_disambiguation',
+    name: '实体消歧',
+    description: '在多个本地候选中判断同名实体是否应合并；只返回候选 ID、置信度和理由。',
+    variables: ['name', 'kind', 'dynasty', 'quote', 'candidates_json'],
+    template: '''你是严谨的古籍实体消歧助手。请判断当前实体应匹配哪一个已有候选，或建议新建实体。
+
+当前实体：
+名称：{{name}}
+类型：{{kind}}
+朝代：{{dynasty}}
+原文：{{quote}}
+
+候选实体（id 为候选编号，不是数据库 ID）：
+{{candidates_json}}
+
+只输出紧凑 JSON，不要 Markdown 围栏，不要解释：
+{"entity":1,"confidence":0.0,"reason":"一句话依据","merge":true}
+
+规则：
+1. 只有名称、别名、朝代、类型、原文语境能够相互支持时才匹配。
+2. 同名但朝代、身份或事迹明显不同，输出 {"entity":null,"confidence":0.0,"reason":"同名不同人","merge":false}。
+3. 无法确定时 entity 输出 null，merge 为 false，不要强行匹配。
+4. confidence 为 0 到 1 的小数。''',
+  ),
+  DefaultPrompt(
     key: 'knowledge_extract',
     name: '联合知识抽取',
     description: '一次抽取实体、人物关系和历史事件，使用短索引关联原文证据。',

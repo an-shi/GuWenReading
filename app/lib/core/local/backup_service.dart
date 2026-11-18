@@ -41,6 +41,7 @@ class BackupService {
     'knowledge_chunk_cache',
     'knowledge_extraction_state',
     'translation_cache',
+    'entity_disambiguation_cache',
   ];
 
   static const _restoreTables = <String>[

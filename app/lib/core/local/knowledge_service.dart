@@ -1,5 +1,9 @@
 import 'dart:async';
 import 'dart:convert';
+import 'dart:math' as math;
+
+import 'package:crypto/crypto.dart';
+import 'package:sqflite/sqflite.dart';
 
 import '../../data/models.dart';
 import 'ai_service.dart';
@@ -18,13 +22,25 @@ class KnowledgeService {
   final AiSettingsService aiSettings;
   final AiJsonClient client;
 
+  static const _schemaVersion = 2;
+
   Future<TaskInfo> startExtraction(String chapterId) async {
+    final active = await store.activeTask(
+      type: 'knowledge_extraction',
+      chapterId: chapterId,
+    );
+    if (active != null && active.status != 'paused') return active;
+    if (active != null) {
+      await store.updateTask(active.id, status: 'running', error: null);
+      unawaited(_runExtraction(active.id, chapterId));
+      return (await store.getTask(active.id)) ?? active;
+    }
     final content = await store.chapterContent(chapterId);
     if (content == null) throw KnowledgeException('章节不存在');
     final task = await store.createTask(
       type: 'knowledge_extraction',
       title: '抽取知识《${content.bookTitle}》· ${content.chapterTitle}',
-      total: 3,
+      total: 1,
       bookId: content.bookId,
       chapterId: chapterId,
     );
@@ -38,282 +54,728 @@ class KnowledgeService {
       await store.updateTask(taskId, status: 'failed', error: '章节不存在');
       return;
     }
-    final resolved = await aiSettings.resolve(purpose: 'chat');
+    final resolved = await aiSettings.resolve(purpose: 'extraction');
     if (resolved == null) {
-      await store.updateTask(taskId, status: 'failed', error: '尚未配置默认问答模型');
+      await store.updateTask(taskId, status: 'failed', error: '尚未配置默认知识抽取模型');
       return;
     }
-    await store.updateTask(taskId, status: 'running', progress: 5);
-    final paragraphsJson = jsonEncode([
-      for (final paragraph in content.paragraphs)
-        {
-          'paragraph_id': paragraph.id,
-          'sentences': [
-            for (final sentence in paragraph.sentences)
-              {'id': sentence.id, 'text': sentence.originalText},
-          ],
-        },
-    ]);
-    try {
-      final entityPrompt = await aiSettings.render('entity_extract', {
-        'book_title': content.bookTitle,
-        'chapter_title': content.chapterTitle,
-        'paragraphs_json': paragraphsJson,
-      });
-      final entityData = await client.chatJson(
-        purpose: 'chat',
-        prompt: entityPrompt,
-        temperature: 0.1,
-      );
-      final entityRows = jsonList(entityData['entities']);
-      var entityCount = 0;
-      for (final item in entityRows) {
-        final name = jsonString(item['name']);
-        if (name == null) continue;
-        final entityId = await _findOrCreateEntity(item, name);
-        final mentions = jsonList(item['mentions']);
-        for (final mention in mentions) {
-          final sentenceId = jsonString(mention['sentence_id']);
-          final sentence = _findSentence(content, sentenceId);
-          final quote =
-              jsonString(mention['quote']) ?? sentence?.originalText ?? '';
-          if (quote.isEmpty) continue;
-          await _insertMention(entityId, content, sentence?.id, quote);
-        }
-        entityCount += 1;
-      }
-      await store.updateTask(taskId, progress: 38);
-      final entities = await listEntities();
-      final relationPrompt = await aiSettings.render('relation_extract', {
-        'book_title': content.bookTitle,
-        'chapter_title': content.chapterTitle,
-        'entities_json': jsonEncode([
-          for (final entity in entities)
-            {
-              'name': entity.name,
-              'aliases': entity.aliases,
-              'kind': entity.kind,
-            },
-        ]),
-        'paragraphs_json': paragraphsJson,
-      });
-      final relationData = await client.chatJson(
-        purpose: 'chat',
-        prompt: relationPrompt,
-        temperature: 0.1,
-      );
-      var relationCount = 0;
-      for (final item in jsonList(relationData['relations'])) {
-        final fromName = jsonString(item['from']);
-        final toName = jsonString(item['to']);
-        if (fromName == null || toName == null || fromName == toName) continue;
-        final from = await _findEntityByName(fromName);
-        final to = await _findEntityByName(toName);
-        if (from == null || to == null) continue;
-        final type = jsonString(item['type']) ?? '其他';
-        final existing = await store.db.query(
-          'entity_relations',
-          where:
-              'from_entity_id = ? AND to_entity_id = ? AND relation_type = ?',
-          whereArgs: [from['id'], to['id'], type],
-          limit: 1,
-        );
-        if (existing.isNotEmpty) continue;
-        final relationId = newLocalId('rel');
-        final now = nowIso();
-        await store.db.insert('entity_relations', {
-          'id': relationId,
-          'from_entity_id': from['id'],
-          'to_entity_id': to['id'],
-          'relation_type': type,
-          'label': type,
-          'description': jsonString(item['description']),
-          'status': 'inferred',
-          'confidence': 0.65,
-          'created_at': now,
-          'updated_at': now,
-        });
-        final sentenceId = jsonString(item['sentence_id']);
-        final sentence = _findSentence(content, sentenceId);
-        final quote = jsonString(item['quote']) ?? sentence?.originalText ?? '';
-        if (quote.isNotEmpty) {
-          await store.db.insert('relation_sources', {
-            'id': newLocalId('relsrc'),
-            'relation_id': relationId,
-            'sentence_id': sentence?.id,
-            'book_id': content.bookId,
-            'chapter_id': content.chapterId,
-            'quote': quote,
-          });
-        }
-        relationCount += 1;
-      }
-      await store.updateTask(taskId, progress: 70);
-      final eventPrompt = await aiSettings.render('event_extract', {
-        'book_title': content.bookTitle,
-        'chapter_title': content.chapterTitle,
-        'paragraphs_json': paragraphsJson,
-      });
-      final eventData = await client.chatJson(
-        purpose: 'chat',
-        prompt: eventPrompt,
-        temperature: 0.1,
-      );
-      var eventCount = 0;
-      for (final item in jsonList(eventData['events'])) {
-        final name = jsonString(item['name']);
-        if (name == null) continue;
-        final eventId = newLocalId('event');
-        final now = nowIso();
-        await store.db.insert('historical_events', {
-          'id': eventId,
-          'name': name,
-          'event_type': jsonString(item['type']) ?? '其他',
-          'description': jsonString(item['description']),
-          'dynasty': jsonString(item['dynasty']),
-          'time_raw': jsonString(item['time_raw']),
-          'time_start_year': jsonInt(item['time_start_year']),
-          'time_end_year': jsonInt(item['time_end_year']),
-          'time_precision': jsonString(item['time_precision']) ?? 'unknown',
-          'time_note': jsonString(item['time_note']),
-          'status': 'extracted',
-          'created_at': now,
-          'updated_at': now,
-        });
-        for (final participant in (item['participants'] as List? ?? const [])) {
-          final participantName = '$participant'.trim();
-          if (participantName.isEmpty) continue;
-          final entity = await _findEntityByName(participantName);
-          await store.db.insert('event_participants', {
-            'id': newLocalId('ep'),
-            'event_id': eventId,
-            'entity_id': entity?['id'],
-            'name': participantName,
-          });
-        }
-        final sentenceId = jsonString(item['sentence_id']);
-        final sentence = _findSentence(content, sentenceId);
-        final quote = jsonString(item['quote']) ?? sentence?.originalText ?? '';
-        if (quote.isNotEmpty) {
-          await store.db.insert('event_sources', {
-            'id': newLocalId('esrc'),
-            'event_id': eventId,
-            'sentence_id': sentence?.id,
-            'book_id': content.bookId,
-            'chapter_id': content.chapterId,
-            'quote': quote,
-          });
-        }
-        eventCount += 1;
-      }
+    final promptVersion = await aiSettings.activePromptVersion(
+      'knowledge_extract',
+    );
+    final chunks = _buildChunks(content, resolved.model);
+    if (chunks.isEmpty) {
       await store.updateTask(
         taskId,
         status: 'completed',
         progress: 100,
-        completed: 3,
+        total: 0,
+        completed: 0,
+        result: {'cached': true, 'chunks': 0},
+      );
+      return;
+    }
+    final chapterHash = _chapterHash(content);
+    final cachedState = await store.knowledgeExtractionState(chapterId);
+    if (cachedState != null &&
+        cachedState['status'] == 'completed' &&
+        cachedState['content_hash'] == chapterHash &&
+        cachedState['model_label'] == resolved.label &&
+        cachedState['prompt_version'] == promptVersion &&
+        cachedState['schema_version'] == _schemaVersion) {
+      await store.updateTask(
+        taskId,
+        status: 'completed',
+        progress: 100,
+        total: chunks.length,
+        completed: chunks.length,
         result: {
-          'entities_created': entityCount,
-          'relations_created': relationCount,
-          'events_created': eventCount,
+          'cached_chunks': chunks.length,
+          'chunks': chunks.length,
           'model': resolved.label,
         },
       );
-    } catch (error) {
-      await store.updateTask(taskId, status: 'failed', error: '$error');
+      return;
     }
+    await store.updateTask(
+      taskId,
+      status: 'running',
+      total: chunks.length,
+      progress: 0,
+    );
+    var completedChunks = 0;
+    var failedChunks = 0;
+    var cachedChunks = 0;
+    var createdEntities = 0;
+    var matchedEntities = 0;
+    var createdRelations = 0;
+    var matchedRelations = 0;
+    var createdEvents = 0;
+    var matchedEvents = 0;
+    for (var index = 0; index < chunks.length; index++) {
+      final currentTask = await store.getTask(taskId);
+      if (currentTask == null ||
+          currentTask.status == 'cancelled' ||
+          currentTask.status == 'paused') {
+        return;
+      }
+      final chunk = chunks[index];
+      try {
+        final cachedJson = await store.knowledgeChunkCache(
+          chapterId: chapterId,
+          chunkIndex: chunk.index,
+          contentHash: chunk.contentHash,
+          modelLabel: resolved.label,
+          promptVersion: promptVersion,
+          schemaVersion: _schemaVersion,
+        );
+        Map<String, dynamic> data;
+        if (cachedJson != null) {
+          data = jsonDecode(cachedJson) as Map<String, dynamic>;
+          cachedChunks += 1;
+        } else {
+          final items = [
+            for (var i = 0; i < chunk.sentences.length; i++)
+              {'i': i + 1, 't': chunk.sentences[i].originalText},
+          ];
+          final prompt = await aiSettings.render('knowledge_extract', {
+            'book_title': content.bookTitle,
+            'chapter_title': content.chapterTitle,
+            'items_json': jsonEncode(items),
+          });
+          data = await client.chatJson(
+            purpose: 'extraction',
+            prompt: prompt,
+            temperature: 0.1,
+            taskId: taskId,
+            taskType: 'knowledge_extraction',
+          );
+          await store.putKnowledgeChunkCache(
+            chapterId: chapterId,
+            chunkIndex: chunk.index,
+            contentHash: chunk.contentHash,
+            modelLabel: resolved.label,
+            promptVersion: promptVersion,
+            schemaVersion: _schemaVersion,
+            resultJson: jsonEncode(data),
+          );
+        }
+        final stats = await _applyChunk(content, chunk, data);
+        createdEntities += stats.createdEntities;
+        matchedEntities += stats.matchedEntities;
+        createdRelations += stats.createdRelations;
+        matchedRelations += stats.matchedRelations;
+        createdEvents += stats.createdEvents;
+        matchedEvents += stats.matchedEvents;
+        completedChunks += 1;
+      } catch (error) {
+        failedChunks += 1;
+        await store.updateTask(
+          taskId,
+          error: '第 ${index + 1}/${chunks.length} 块抽取失败：$error',
+        );
+      }
+      await store.updateTask(
+        taskId,
+        progress: (completedChunks + failedChunks) / chunks.length * 100,
+        completed: completedChunks,
+        failedCount: failedChunks,
+      );
+      if (await _pauseIfBudgetExceeded(taskId)) return;
+    }
+    final status = failedChunks == 0
+        ? 'completed'
+        : (completedChunks == 0 ? 'failed' : 'partial');
+    await store.putKnowledgeExtractionState(
+      chapterId: chapterId,
+      contentHash: chapterHash,
+      modelLabel: resolved.label,
+      promptVersion: promptVersion,
+      schemaVersion: _schemaVersion,
+      status: status == 'completed' ? 'completed' : 'partial',
+    );
+    await store.updateTask(
+      taskId,
+      status: status,
+      progress: 100,
+      completed: completedChunks,
+      failedCount: failedChunks,
+      result: {
+        'entities_created': createdEntities,
+        'entities_matched': matchedEntities,
+        'relations_created': createdRelations,
+        'relations_matched': matchedRelations,
+        'events_created': createdEvents,
+        'events_matched': matchedEvents,
+        'cached_chunks': cachedChunks,
+        'chunks': chunks.length,
+        'model': resolved.label,
+      },
+    );
   }
 
-  Sentence? _findSentence(ChapterContent content, String? sentenceId) {
-    if (sentenceId == null) return null;
+  Future<bool> _pauseIfBudgetExceeded(String taskId) async {
+    final budget = await readAiTaskBudget();
+    if (budget <= 0) return false;
+    final task = await store.getTask(taskId);
+    if (task == null || task.cost < budget) return false;
+    await store.updateTask(
+      taskId,
+      status: 'paused',
+      error:
+          '已达到单次任务费用上限（${task.cost.toStringAsFixed(4)} / '
+          '${budget.toStringAsFixed(4)}）。请提高预算后重新开始任务。',
+    );
+    return true;
+  }
+
+  List<_KnowledgeChunk> _buildChunks(
+    ChapterContent content,
+    AiModelRecord model,
+  ) {
+    final budget = _chunkTokenBudget(model);
+    final chunks = <_KnowledgeChunk>[];
+    var current = <Sentence>[];
+    var tokens = 0;
+
+    void flush() {
+      if (current.isEmpty) return;
+      chunks.add(
+        _KnowledgeChunk(
+          index: chunks.length,
+          sentences: current,
+          contentHash: _chunkHash(current),
+        ),
+      );
+      current = <Sentence>[];
+      tokens = 0;
+    }
+
+    for (final paragraph in content.paragraphs) {
+      final paragraphTokens = paragraph.sentences.fold<int>(
+        0,
+        (sum, sentence) => sum + estimateTokens(sentence.originalText) + 4,
+      );
+      if (current.isNotEmpty && tokens + paragraphTokens > budget) {
+        flush();
+      }
+      if (paragraphTokens > budget) {
+        for (final sentence in paragraph.sentences) {
+          final sentenceTokens = estimateTokens(sentence.originalText) + 4;
+          if (current.isNotEmpty && tokens + sentenceTokens > budget) {
+            flush();
+          }
+          current.add(sentence);
+          tokens += sentenceTokens;
+        }
+      } else {
+        current.addAll(paragraph.sentences);
+        tokens += paragraphTokens;
+      }
+    }
+    flush();
+    return chunks;
+  }
+
+  int _chunkTokenBudget(AiModelRecord model) {
+    final inputBound = math.max(
+      900,
+      model.contextWindow - model.maxOutputTokens - 1200,
+    );
+    final outputBound = math.max(900, model.maxOutputTokens * 2);
+    return math.max(900, math.min(5000, math.min(inputBound, outputBound)));
+  }
+
+  String _chapterHash(ChapterContent content) {
+    final buffer = StringBuffer();
     for (final paragraph in content.paragraphs) {
       for (final sentence in paragraph.sentences) {
-        if (sentence.id == sentenceId) return sentence;
+        buffer
+          ..write(sentence.id)
+          ..write('\u0001')
+          ..write(sentence.originalText)
+          ..write('\u0002');
       }
+    }
+    return sha256.convert(utf8.encode(buffer.toString())).toString();
+  }
+
+  String _chunkHash(List<Sentence> sentences) {
+    final buffer = StringBuffer();
+    for (final sentence in sentences) {
+      buffer
+        ..write(sentence.id)
+        ..write('\u0001')
+        ..write(sentence.originalText)
+        ..write('\u0002');
+    }
+    return sha256.convert(utf8.encode(buffer.toString())).toString();
+  }
+
+  Future<_ChunkApplyStats> _applyChunk(
+    ChapterContent content,
+    _KnowledgeChunk chunk,
+    Map<String, dynamic> data,
+  ) async {
+    final sentenceByIndex = <int, Sentence>{
+      for (var i = 0; i < chunk.sentences.length; i++)
+        i + 1: chunk.sentences[i],
+    };
+    return store.db.transaction<_ChunkApplyStats>((txn) async {
+      var createdEntities = 0;
+      var matchedEntities = 0;
+      var createdRelations = 0;
+      var matchedRelations = 0;
+      var createdEvents = 0;
+      var matchedEvents = 0;
+      final entityIds = <int, String>{};
+      final entityNames = <String, String>{};
+
+      for (final item in jsonList(data['entities'])) {
+        final localId = jsonInt(item['id']);
+        final name = jsonString(item['name']);
+        if (localId == null || name == null || name.isEmpty) continue;
+        final aliases = _jsonStringList(item['aliases']);
+        final kind = _normalizeEntityKind(jsonString(item['type']) ?? 'other');
+        final dynasty = jsonString(item['dynasty']);
+        final existing = await _findEntityRecord(txn, name, aliases);
+        final now = nowIso();
+        String entityId;
+        if (existing == null) {
+          entityId = newLocalId('ent');
+          await txn.insert('entities', {
+            'id': entityId,
+            'canonical_name': name,
+            'kind': kind,
+            'aliases': jsonEncode(aliases),
+            'dynasty': dynasty,
+            'status': 'pending',
+            'created_at': now,
+            'updated_at': now,
+          });
+          createdEntities += 1;
+        } else {
+          entityId = existing['id'] as String;
+          matchedEntities += 1;
+          final mergedAliases = {
+            ..._decodeStringList(existing['aliases']),
+            ...aliases,
+          }..remove(name);
+          final updates = <String, Object?>{'updated_at': now};
+          if (mergedAliases.isNotEmpty) {
+            updates['aliases'] = jsonEncode(mergedAliases.toList());
+          }
+          if ((existing['dynasty'] as String?) == null && dynasty != null) {
+            updates['dynasty'] = dynasty;
+          }
+          await txn.update(
+            'entities',
+            updates,
+            where: 'id = ?',
+            whereArgs: [entityId],
+          );
+        }
+        entityIds[localId] = entityId;
+        entityNames[entityId] = name;
+        for (final sentence in _evidenceSentences(
+          item['evidence'],
+          sentenceByIndex,
+        )) {
+          await _insertMentionIfMissing(
+            txn,
+            entityId: entityId,
+            content: content,
+            sentence: sentence,
+            quote: sentence.originalText,
+          );
+        }
+      }
+
+      for (final item in jsonList(data['relations'])) {
+        final from = _entityRef(item['from'], entityIds);
+        final to = _entityRef(item['to'], entityIds);
+        final type = jsonString(item['type']) ?? '其他';
+        if (from == null || to == null || from == to) continue;
+        final evidence = _evidenceSentences(item['evidence'], sentenceByIndex);
+        if (evidence.isEmpty) continue;
+        final existing = await txn.query(
+          'entity_relations',
+          where:
+              'from_entity_id = ? AND to_entity_id = ? AND relation_type = ?',
+          whereArgs: [from, to, type],
+          limit: 1,
+        );
+        final now = nowIso();
+        String relationId;
+        if (existing.isEmpty) {
+          relationId = newLocalId('rel');
+          await txn.insert('entity_relations', {
+            'id': relationId,
+            'from_entity_id': from,
+            'to_entity_id': to,
+            'relation_type': type,
+            'label': type,
+            'description': null,
+            'status': 'inferred',
+            'confidence': 0.65,
+            'created_at': now,
+            'updated_at': now,
+          });
+          createdRelations += 1;
+        } else {
+          relationId = existing.first['id'] as String;
+          matchedRelations += 1;
+        }
+        for (final sentence in evidence) {
+          await _insertRelationSourceIfMissing(
+            txn,
+            relationId: relationId,
+            content: content,
+            sentence: sentence,
+            quote: sentence.originalText,
+          );
+        }
+      }
+
+      for (final item in jsonList(data['events'])) {
+        final name = jsonString(item['name']);
+        final evidence = _evidenceSentences(item['evidence'], sentenceByIndex);
+        if (name == null || name.isEmpty || evidence.isEmpty) continue;
+        final type = jsonString(item['type']) ?? '其他';
+        final time = jsonString(item['time']);
+        final year = jsonInt(item['year']);
+        final precision = jsonString(item['precision']) ?? 'unknown';
+        final participantIds = <int>[];
+        for (final value in (item['participants'] as List? ?? const [])) {
+          final id = value is num ? value.toInt() : int.tryParse('$value');
+          if (id != null) participantIds.add(id);
+        }
+        final participantNames = <String>[];
+        final participantEntityIds = <String, String?>{};
+        for (final id in participantIds) {
+          final entityId = entityIds[id];
+          final name = entityId == null ? null : entityNames[entityId];
+          if (name == null) continue;
+          participantNames.add(name);
+          participantEntityIds[name] = entityId;
+        }
+        final fingerprint = _eventFingerprint(
+          name: name,
+          type: type,
+          time: time,
+          year: year,
+          participants: participantNames,
+          firstQuote: evidence.first.originalText,
+        );
+        final existing = await _findEventRecord(
+          txn,
+          fingerprint: fingerprint,
+          name: name,
+          type: type,
+          time: time,
+          year: year,
+        );
+        final now = nowIso();
+        String eventId;
+        if (existing == null) {
+          eventId = newLocalId('event');
+          await txn.insert('historical_events', {
+            'id': eventId,
+            'name': name,
+            'event_type': type,
+            'description': null,
+            'dynasty': null,
+            'time_raw': time,
+            'time_start_year': year,
+            'time_end_year': year,
+            'time_precision': precision,
+            'time_note': null,
+            'status': 'extracted',
+            'fingerprint': fingerprint,
+            'created_at': now,
+            'updated_at': now,
+          });
+          createdEvents += 1;
+        } else {
+          eventId = existing['id'] as String;
+          matchedEvents += 1;
+          final updates = <String, Object?>{'updated_at': now};
+          if (existing['fingerprint'] == null) {
+            updates['fingerprint'] = fingerprint;
+          }
+          if (existing['time_raw'] == null && time != null && time.isNotEmpty) {
+            updates['time_raw'] = time;
+          }
+          if (existing['time_start_year'] == null && year != null) {
+            updates['time_start_year'] = year;
+            updates['time_end_year'] = year;
+          }
+          if ((existing['time_precision'] as String? ?? 'unknown') ==
+                  'unknown' &&
+              precision != 'unknown') {
+            updates['time_precision'] = precision;
+          }
+          await txn.update(
+            'historical_events',
+            updates,
+            where: 'id = ?',
+            whereArgs: [eventId],
+          );
+        }
+        for (final name in participantNames) {
+          final entityId = participantEntityIds[name];
+          final existingParticipant = await txn.query(
+            'event_participants',
+            where: 'event_id = ? AND name = ?',
+            whereArgs: [eventId, name],
+            limit: 1,
+          );
+          if (existingParticipant.isEmpty) {
+            await txn.insert('event_participants', {
+              'id': newLocalId('ep'),
+              'event_id': eventId,
+              'entity_id': entityId,
+              'name': name,
+            });
+          } else if (existingParticipant.first['entity_id'] == null &&
+              entityId != null) {
+            await txn.update(
+              'event_participants',
+              {'entity_id': entityId},
+              where: 'id = ?',
+              whereArgs: [existingParticipant.first['id']],
+            );
+          }
+        }
+        for (final sentence in evidence) {
+          await _insertEventSourceIfMissing(
+            txn,
+            eventId: eventId,
+            content: content,
+            sentence: sentence,
+            quote: sentence.originalText,
+          );
+        }
+      }
+
+      return _ChunkApplyStats(
+        createdEntities: createdEntities,
+        matchedEntities: matchedEntities,
+        createdRelations: createdRelations,
+        matchedRelations: matchedRelations,
+        createdEvents: createdEvents,
+        matchedEvents: matchedEvents,
+      );
+    });
+  }
+
+  Future<Map<String, Object?>?> _findEntityRecord(
+    DatabaseExecutor txn,
+    String name,
+    List<String> aliases,
+  ) async {
+    final exact = await txn.query(
+      'entities',
+      where: 'canonical_name = ?',
+      whereArgs: [name],
+      limit: 1,
+    );
+    if (exact.isNotEmpty) return exact.first;
+    final candidates = await txn.query(
+      'entities',
+      where: 'aliases LIKE ?',
+      whereArgs: ['%$name%'],
+      limit: 20,
+    );
+    for (final row in candidates) {
+      final values = _decodeStringList(row['aliases']);
+      if (values.contains(name)) return row;
+    }
+    for (final alias in aliases) {
+      if (alias == name) continue;
+      final aliasExact = await txn.query(
+        'entities',
+        where: 'aliases LIKE ?',
+        whereArgs: ['%$alias%'],
+        limit: 1,
+      );
+      if (aliasExact.isNotEmpty) return aliasExact.first;
     }
     return null;
   }
 
-  Future<String> _findOrCreateEntity(
-    Map<String, dynamic> item,
-    String name,
-  ) async {
-    final existing = await _findEntityByName(name);
-    if (existing != null) return existing['id'] as String;
-    final id = newLocalId('ent');
-    final now = nowIso();
-    await store.db.insert('entities', {
-      'id': id,
-      'canonical_name': name,
-      'kind': jsonString(item['kind']) ?? 'person',
-      'aliases': jsonEncode(
-        (item['aliases'] as List? ?? const [])
-            .map((value) => '$value')
-            .toList(),
-      ),
-      'dynasty': jsonString(item['dynasty']),
-      'identity': jsonString(item['identity']),
-      'summary': jsonString(item['summary']),
-      'description': jsonString(item['description']),
-      'birth_raw': jsonString(item['birth_raw']),
-      'death_raw': jsonString(item['death_raw']),
-      'birth_year': jsonInt(item['birth_year']),
-      'death_year': jsonInt(item['death_year']),
-      'courtesy_name': jsonString(item['courtesy_name']),
-      'art_name': jsonString(item['art_name']),
-      'offices': jsonEncode(
-        (item['offices'] as List? ?? const [])
-            .map((value) => '$value')
-            .toList(),
-      ),
-      'status': 'pending',
-      'created_at': now,
-      'updated_at': now,
-    });
-    return id;
+  List<Sentence> _evidenceSentences(
+    Object? value,
+    Map<int, Sentence> sentenceByIndex,
+  ) {
+    if (value is! List) return const [];
+    final seen = <int>{};
+    final result = <Sentence>[];
+    for (final raw in value) {
+      final index = raw is num ? raw.toInt() : int.tryParse('$raw');
+      if (index == null || !seen.add(index)) continue;
+      final sentence = sentenceByIndex[index];
+      if (sentence != null) result.add(sentence);
+    }
+    return result;
   }
 
-  Future<Map<String, Object?>?> _findEntityByName(String name) async {
-    final value = name.trim();
-    if (value.isEmpty) return null;
-    final rows = await store.db.query(
-      'entities',
-      where: 'canonical_name = ?',
-      whereArgs: [value],
-      limit: 1,
-    );
-    if (rows.isNotEmpty) return rows.first;
-    final aliasRows = await store.db.query(
-      'entities',
-      where: 'aliases LIKE ?',
-      whereArgs: ['%$value%'],
-      limit: 1,
-    );
-    return aliasRows.isEmpty ? null : aliasRows.first;
+  String? _entityRef(Object? value, Map<int, String> entityIds) {
+    final id = value is num ? value.toInt() : int.tryParse('$value');
+    return id == null ? null : entityIds[id];
   }
 
-  Future<void> _insertMention(
-    String entityId,
-    ChapterContent content,
-    String? sentenceId,
-    String quote,
-  ) async {
-    final existing = await store.db.query(
+  Future<void> _insertMentionIfMissing(
+    DatabaseExecutor txn, {
+    required String entityId,
+    required ChapterContent content,
+    required Sentence sentence,
+    required String quote,
+  }) async {
+    final existing = await txn.query(
       'entity_mentions',
       where: 'entity_id = ? AND book_id = ? AND chapter_id = ? AND quote = ?',
       whereArgs: [entityId, content.bookId, content.chapterId, quote],
       limit: 1,
     );
     if (existing.isNotEmpty) return;
-    await store.db.insert('entity_mentions', {
+    await txn.insert('entity_mentions', {
       'id': newLocalId('mention'),
       'entity_id': entityId,
       'book_id': content.bookId,
       'chapter_id': content.chapterId,
-      'sentence_id': sentenceId,
+      'sentence_id': sentence.id,
       'quote': quote,
       'status': 'pending',
       'created_at': nowIso(),
     });
+  }
+
+  Future<void> _insertRelationSourceIfMissing(
+    DatabaseExecutor txn, {
+    required String relationId,
+    required ChapterContent content,
+    required Sentence sentence,
+    required String quote,
+  }) async {
+    final existing = await txn.query(
+      'relation_sources',
+      where:
+          'relation_id = ? AND COALESCE(sentence_id, \'\') = ? AND quote = ?',
+      whereArgs: [relationId, sentence.id, quote],
+      limit: 1,
+    );
+    if (existing.isNotEmpty) return;
+    await txn.insert('relation_sources', {
+      'id': newLocalId('relsrc'),
+      'relation_id': relationId,
+      'sentence_id': sentence.id,
+      'book_id': content.bookId,
+      'chapter_id': content.chapterId,
+      'quote': quote,
+    });
+  }
+
+  Future<void> _insertEventSourceIfMissing(
+    DatabaseExecutor txn, {
+    required String eventId,
+    required ChapterContent content,
+    required Sentence sentence,
+    required String quote,
+  }) async {
+    final existing = await txn.query(
+      'event_sources',
+      where: 'event_id = ? AND COALESCE(sentence_id, \'\') = ? AND quote = ?',
+      whereArgs: [eventId, sentence.id, quote],
+      limit: 1,
+    );
+    if (existing.isNotEmpty) return;
+    await txn.insert('event_sources', {
+      'id': newLocalId('esrc'),
+      'event_id': eventId,
+      'sentence_id': sentence.id,
+      'book_id': content.bookId,
+      'chapter_id': content.chapterId,
+      'quote': quote,
+    });
+  }
+
+  Future<Map<String, Object?>?> _findEventRecord(
+    DatabaseExecutor txn, {
+    required String fingerprint,
+    required String name,
+    required String type,
+    required String? time,
+    required int? year,
+  }) async {
+    final direct = await txn.query(
+      'historical_events',
+      where: 'fingerprint = ?',
+      whereArgs: [fingerprint],
+      limit: 1,
+    );
+    if (direct.isNotEmpty) return direct.first;
+    if (year == null && (time == null || time.isEmpty)) return null;
+    final fallback = await txn.query(
+      'historical_events',
+      where: 'name = ? AND event_type = ? AND COALESCE(time_start_year, -999999) = ? AND COALESCE(time_raw, \'\') = ?',
+      whereArgs: [name, type, year ?? -999999, time ?? ''],
+      limit: 1,
+    );
+    return fallback.isEmpty ? null : fallback.first;
+  }
+
+  String _eventFingerprint({
+    required String name,
+    required String type,
+    required String? time,
+    required int? year,
+    required List<String> participants,
+    required String firstQuote,
+  }) {
+    final normalizedParticipants = [...participants]..sort();
+    final normalizedName = name.replaceAll(RegExp(r'\s+'), '').trim();
+    final base = StringBuffer()
+      ..write(normalizedName)
+      ..write('|')
+      ..write(type)
+      ..write('|')
+      ..write(year ?? '')
+      ..write('|')
+      ..write((time ?? '').replaceAll(RegExp(r'\s+'), ''))
+      ..write('|')
+      ..write(normalizedParticipants.join(','));
+    if (year == null &&
+        (time == null || time.isEmpty) &&
+        participants.isEmpty) {
+      base
+        ..write('|')
+        ..write(sha256.convert(utf8.encode(firstQuote)).toString());
+    }
+    return sha256.convert(utf8.encode(base.toString())).toString();
+  }
+
+  String _normalizeEntityKind(String kind) {
+    const allowed = {
+      'person',
+      'place',
+      'office',
+      'institution',
+      'dynasty',
+      'work',
+      'other',
+    };
+    final value = kind.trim().toLowerCase();
+    return allowed.contains(value) ? value : 'other';
+  }
+
+  List<String> _jsonStringList(Object? value) {
+    if (value is List) {
+      return value
+          .map((item) => '$item'.trim())
+          .where((item) => item.isNotEmpty)
+          .toList();
+    }
+    return const [];
   }
 
   Future<List<HistoricalEntity>> listEntities({
@@ -710,4 +1172,34 @@ class KnowledgeException implements Exception {
   final String message;
   @override
   String toString() => message;
+}
+
+class _KnowledgeChunk {
+  const _KnowledgeChunk({
+    required this.index,
+    required this.sentences,
+    required this.contentHash,
+  });
+
+  final int index;
+  final List<Sentence> sentences;
+  final String contentHash;
+}
+
+class _ChunkApplyStats {
+  const _ChunkApplyStats({
+    required this.createdEntities,
+    required this.matchedEntities,
+    required this.createdRelations,
+    required this.matchedRelations,
+    required this.createdEvents,
+    required this.matchedEvents,
+  });
+
+  final int createdEntities;
+  final int matchedEntities;
+  final int createdRelations;
+  final int matchedRelations;
+  final int createdEvents;
+  final int matchedEvents;
 }

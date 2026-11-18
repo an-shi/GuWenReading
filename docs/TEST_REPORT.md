@@ -20,7 +20,7 @@ cd app
 flutter test
 ```
 
-结果：`10 tests passed`
+结果：`11 tests passed`
 
 覆盖：
 
@@ -32,6 +32,7 @@ flutter test
 - 备份创建、列表与恢复；恢复后数据状态一致。
 - 阅读模式映射与章节内容序列化。
 - 移动端/桌面端应用壳启动：底部导航与 NavigationRail。
+- AI 联合抽取、Token/费用计量、翻译短 ID 与批次缓存、逐句翻译缓存、任务去重、长章节分块、事件证据合并、章节重复抽取跳过、单次任务预算暂停（Mock OpenAI 兼容服务）。
 
 ### Android 构建
 
@@ -79,7 +80,8 @@ flutter build windows --debug
 - 使用《汉书》EPUB（1.6 MB）实测：完整导入约 4.9 秒，共 120 章、44,668 句。
 - Windows 端关闭 Flutter 的 MSAA/UIA 无障碍树，规避 Flutter 3.47 引擎在原生文件对话框关闭时 `AccessibilityBridge::CreateRemoveReparentedNodesUpdate` 的崩溃。
 - 书架支持编辑书籍信息与永久删除；使用临时数据库验证删除会清理章节、句子、译文、批注、书签、进度、人物、关系、事件、任务、助手会话、FTS 索引及原始文件。
-- 验证方式：`flutter analyze` 无问题，`flutter build windows --debug` 成功且应用可打开。
+- AI 流水线使用本地 Mock OpenAI 兼容服务验证：Token/费用计量、翻译短 ID、逐句/批次缓存、任务去重、联合抽取、长章节分块、失败块重试、事件证据合并、重复抽取跳过、单次预算暂停。
+- 验证方式：`flutter analyze` 无问题，`flutter test` 11 项通过，`flutter build windows --debug` 成功且应用可打开。
 
 ## 3. 验证过的核心路径
 
@@ -95,7 +97,7 @@ flutter build windows --debug
 
 - **Windows 桌面运行**：已构建并启动，字体与数据目录迁移流程待人工逐页确认。
 - **Android/iOS UI 冒烟**：模拟器未连接，iOS 需要 macOS。
-- **真实 AI 服务**：没有第三方 API Key；翻译、知识抽取、助手的 HTTP/JSON 路径未做真实服务端到端验证。
+- **真实 AI 服务**：没有第三方 API Key；AI 流水线使用本地 Mock OpenAI 兼容服务验证，真实 Provider 的模型质量、限流和账单仍需配置密钥后验证。
 - **PDF 文字提取运行**：代码已接入 pdfrx/PDFium，APK 中包含原生库，但未在设备上实测文本型 PDF。
 - **扫描版 PDF OCR**：明确未实现。
 - **Tauri/Rust**：已移除，不再是本项目的一部分。

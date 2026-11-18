@@ -2,7 +2,7 @@
 
 最后更新：2026-11-17
 
-本文记录当前“章节翻译”和“章节知识抽取”的真实调用链、计费风险点，以及后续降低 AI 调用费用的可选方案。内容以当前代码为准，未修改运行时逻辑。
+本文记录当前已实现的章节翻译、知识抽取和 AI 调用计量机制，以及仍然存在的成本优化空间。内容以代码为准。
 
 相关代码：
 
@@ -12,626 +12,529 @@
 - `app/lib/core/local/prompt_defaults.dart`
 - `app/lib/core/local/local_store.dart`
 - `app/lib/core/local/schema.dart`
+- `app/lib/core/local/app_database.dart`
+- `app/lib/features/tasks/tasks_screen.dart`
+- `app/lib/features/settings/settings_screen.dart`
 - `app/lib/features/reader/reader_screen.dart`
 - `app/lib/features/book_detail/book_detail_screen.dart`
 
-## 0. 结论摘要
+## 0. 当前实现摘要
 
-当前实现的主要成本特征：
+已实现：
 
-1. **翻译按章节、按约 2200 字分批调用**，每批一次请求；批量大小按字符数而非 token 数决定。
-2. 每个翻译批次都会重复携带书籍信息、章节信息、前后文和完整指令；上下文会随批次重复计费。
-3. 翻译有精确提示词缓存，但缓存键包含整段提示词和模型显示名，批次边界或上下文变化后容易失效。
-4. 单句“重新翻译”不查翻译缓存，会直接调用模型。
-5. **知识抽取固定为每章 3 次调用**：实体、关系、事件各一次，而且同一章的完整正文在 3 个提示词中各发送一遍。
-6. 关系抽取提示词还会额外带上最多 300 个全局实体，可能包含与本批次无关的人物。
-7. 知识抽取没有缓存、没有“已抽取”跳过、没有章节文本哈希版本；重复点击会重复调用，而且会重复插入历史事件。
-8. 当前没有采集 token 用量、缓存命中、每次调用费用，因此无法从应用内准确知道钱花在哪里。
+1. **统一 AI 调用计量**
+   - 每次 AI 请求记录任务、任务类型、Provider、模型、输入/输出 Token、缓存读取/写入 Token、费用、耗时、状态、重试次数和是否估算。
+   - 优先读取 Provider 的真实 `usage`；缺失时使用本地保守估算并标记 `is_estimated`。
+   - 任务表聚合输入/输出 Token、缓存 Token、费用和请求次数。
+   - 任务中心展示总用量、按任务类型/模型统计，以及每个任务的 Token 和费用。
 
-优先优化顺序建议：
+2. **知识抽取联合调用**
+   - 原来的“实体、关系、事件各调用一次”改为新的 `knowledge_extract` 联合提示词。
+   - 一般章节一次请求完成实体、关系、事件抽取。
+   - 超长章节按段落边界和 Token 预算分块，每块一次请求，每块完成立即落库。
+   - 使用短句子索引关联证据，不要求模型重复输出 UUID 和完整原文。
+   - 章节级 Hash + 模型 + Prompt 版本 + Schema 版本缓存；章节未变时直接复用，不再调用 API。
+   - 块级缓存支持部分失败后只重做失败块。
+   - 实体优先本地复用；关系按 from/to/type 去重并追加新的史料证据；事件使用指纹去重并合并跨块/跨书证据。
+
+3. **翻译优化**
+   - 按模型上下文和最大输出推导批次字符预算，并设置保守安全边界。
+   - 请求内部使用短整数索引，不再重复发送句子 UUID。
+   - 上下文按句子长度和指代特征动态扩缩，并设置字符上限。
+   - 新增逐句翻译缓存，批次边界变化不会导致全部缓存失效。
+   - 单句重译默认使用逐句缓存，阅读器另提供“强制重译”绕过缓存。
+   - 保留批次级提示词缓存作为第二层缓存。
+
+4. **任务防重复与恢复**
+   - 同一章节已有运行中的翻译/抽取任务时直接返回已有任务。
+   - 任务支持取消；暂停任务在再次点击任务入口时可恢复。
+   - 翻译成功的句子、知识抽取成功的块都会缓存，恢复时不会重复计费。
+   - 单次任务费用达到设置上限时自动暂停。
+
+5. **模型路由基础**
+   - 支持默认翻译模型、默认问答模型、默认知识抽取模型。
+   - 未设置默认知识抽取模型时回退到默认问答模型，兼容旧配置。
+   - 模型可配置输入、输出、缓存读取、缓存写入单价（每百万 Token，币种由用户自行统一）。
+
+尚未实现（见第 7 节）：
+
+- Provider 原生 Prompt Caching 和 Batch API 的显式支持。
+- 精确 Tokenizer；当前对没有 usage 的响应使用估算。
+- 单章节、单本书级别的独立预算（目前是单次任务预算）。
+- 自动在应用重启后无人工点击恢复任务。
+- AI 参与的多候选实体消歧。
+- 供应商连接测试调用的用量统计。
+- 按实体/关系/事件分别路由不同模型；当前联合抽取使用一个“知识抽取模型”。
+
+## 1. 翻译调用链
 
 ```text
-用量计量与预估
-  → 知识抽取单次调用 / 跳已抽取 / 结果缓存
-  → 翻译短 ID、按 token 分批、缓存单句重译
-  → 关系/事件候选过滤、上下文压缩、模型路由
-  → 批量 API、Prompt Caching、分块断点续跑
-```
-
-## 1. 调用链路总览
-
-```text
-章节翻译
-  ReaderScreen / BookDetailScreen
+ReaderScreen / BookDetailScreen
         │
         ▼
-  TranslationService.startChapterTranslation
-        │  创建 tasks 记录（type=translation）
-        ▼
-  TranslationService._run（异步）
+TranslationService.startChapterTranslation
         │
-        ├─ 选出未翻译且非人工的句子
-        ├─ 按约 2200 字切批
-        ├─ 渲染 translation 提示词
-        ├─ 查 translation_cache
-        │     ├─ 命中：直接使用缓存 JSON（0 次 API）
-        │     └─ 未命中：AiJsonClient.chatJson（1 次 API）
-        ├─ 解析 translations/items
-        ├─ 写入 translations 表
-        ├─ 更新 FTS 译文索引
-        └─ 更新 tasks 进度与结果
-
-章节知识抽取
-  BookDetailScreen 章节操作
+        ├─ 同一章节已有 queued/running 任务？直接返回
+        ├─ 同一章节有 paused 任务？恢复执行
+        └─ 创建 tasks(type=translation)
+                │
+                ▼
+TranslationService._run
         │
-        ▼
-  KnowledgeService.startExtraction
-        │  创建 tasks 记录（type=knowledge_extraction，total=3）
-        ▼
-  KnowledgeService._runExtraction（异步）
-        │
-        ├─ 调用 1：实体抽取（整章正文）
-        ├─ 写入 entities / entity_mentions
-        ├─ 调用 2：关系抽取（整章正文 + 最多 300 个全局实体）
-        ├─ 写入 entity_relations / relation_sources
-        ├─ 调用 3：事件抽取（整章正文）
-        └─ 写入 historical_events / participants / sources
+        ├─ 选择目标句子：跳过人工译文；普通重译跳过已有 AI 译文
+        ├─ 逐句查 translation_sentence_cache
+        │     ├─ 命中：本地写回译文 + FTS，不调用 API
+        │     └─ 未命中：进入待翻译列表
+        ├─ 按模型预算动态分批
+        ├─ 查 translation_cache（批次级完整提示词缓存）
+        │     ├─ 命中：使用缓存 JSON
+        │     └─ 未命中：AiJsonClient.chatJson（记录 usage/费用）
+        ├─ 按短索引解析 translations/items
+        ├─ 成功的句子写入 translations、逐句缓存和 FTS
+        ├─ 失败句标记 failed，不重发已成功句
+        └─ 更新任务进度；达到任务预算时暂停
 ```
 
-## 2. 章节翻译机制
+### 1.1 目标句子
 
-### 2.1 触发方式
+- 人工译文永远不会被 AI 覆盖。
+- `retranslate=false`：只处理没有译文或上次失败的句子。
+- `retranslate=true`：处理所有非人工译文，但逐句缓存仍可复用。
 
-- 阅读器顶部翻译按钮 / “翻译本章”。
-- 书籍详情页章节操作中的“翻译本章”。
-- 阅读器设置 `autoTranslate` 打开时，进入未完成翻译的章节会自动触发一次。
-- 阅读器还提供“重新翻译本章”：会重新处理所有非人工译文，包括已有 AI 译文。
-- 单句“重新翻译”走 `TranslationService.retranslateSentence`，不属于章节批量任务。
+### 1.2 批次预算
 
-### 2.2 任务与目标句子
-
-`startChapterTranslation`：
-
-1. 读取章节内容，统计章节句子总数，创建 `tasks` 记录。
-2. 异步启动 `_run`，接口立即返回任务对象，UI 轮询任务进度。
-
-`_run` 选择目标句子：
+`_batchCharBudget` 使用：
 
 ```text
-人工译文：永远跳过
-已有 AI 译文：
-  普通翻译：跳过
-  retranslate=true：重新翻译
-没有译文或上次失败：进入目标列表
+输出边界 = max(400, maxOutputTokens × 0.75)
+输入边界 = max(600, contextWindow - maxOutputTokens - 1200)
+批次预算 = max(400, min(6000, 输出边界, 输入边界))
 ```
 
-所有目标句子按章节顺序组成 `targets`。如果目标为空，任务直接完成，不产生 API 调用。
+这是保守的字符预算，中文按接近“1 字符 ≈ 1 token”处理。它没有接入各 Provider 的精确 tokenizer，但能避免固定 2200 字导致小上下文模型超限或输出截断。
 
-### 2.3 分批策略
+### 1.3 翻译短 ID
 
-当前按**原始文本字符数**贪心分批：
-
-```text
-每批最多约 2200 个原文字符；
-如果当前批为空，即使第一句超过 2200 字也会加入；
-达到 2200 字后停止加句。
-```
-
-因此一批可能略超 2200 字，具体取决于最后一句的长度。分批没有参考：
-
-- 模型上下文窗口
-- 模型最大输出 token
-- 译文长度
-- JSON 输出中的 id 开销
-- 当前章节的句数密度
-
-### 2.4 翻译提示词
-
-`translation` 提示词包含：
-
-- 翻译规则（逐句、不遗漏、保留歧义、只输出 JSON）
-- 书名、作者、章节名
-- `context_before`
-- `context_after`
-- `items_json`：本批 `{id, text}` 数组
-
-前后文构造（`_context`）：
-
-- 上文：当前句之前 2 句 + 前一段整段
-- 下文：当前句之后 2 句 + 后一段整段
-- 每批只取批次第一句的上文、最后一句的下文
-
-这意味着：
-
-- 相邻批次会重复携带一部分上下文。
-- 如果段落很长，前一段/后一段可能非常长，提示词会超过预期。
-- 上下文对翻译质量有价值，但它是按批次重复计费的。
-
-### 2.5 翻译缓存
-
-缓存表：`translation_cache(cache_key, text, created_at)`。
-
-缓存键：
-
-```text
-sha256(模型 label + "|" + 完整渲染后的提示词)
-```
-
-特点：
-
-- 同一模型、同一提示词、同一批次边界：命中缓存，0 次 API 调用。
-- 模型显示名改变、提示词版本改变、上下文改变、批次边界改变：视为不同缓存。
-- 缓存值保存模型返回的原始 JSON，不重复保存单句。
-- 缓存没有过期时间、容量上限和清理入口，旧提示词会长期占空间。
-- 单句“重新翻译”`retranslateSentence` **不查该缓存**，每次都会直接调用模型。
-
-### 2.6 响应处理
-
-- 兼容 `{translations:[...]}` 和 `{items:[...]}` 两种返回结构。
-- 按句子 id 匹配译文。
-- 成功：写入 `translations`，更新译文 FTS 索引。
-- 缺失译文：该句标记 `failed`，错误为“AI 未返回该句译文”。
-- 整个批次抛异常：该批所有句子标记 `failed`，任务继续下一批。
-- 最终任务状态：`completed` / `partial` / `failed`。
-- 任务结果记录完成数、失败数、缓存命中数、模型 label。
-
-### 2.7 当前翻译成本构成
-
-设：
-
-- `S`：本章目标原文字符数
-- `B`：每批目标字符数（当前约 2200）
-- `O`：每批固定提示词开销（规则、书名、章节、上下文）
-- `I`：每批输入 tokens
-- `T`：每批输出 tokens（译文 + JSON 结构 + id 开销）
-- `N = ceil(S / B)`：约等于调用批次数
-
-则大致：
-
-```text
-总输入 tokens ≈ N × O + S 的 token 数 + 重复上下文 tokens
-总输出 tokens ≈ 译文 tokens + N × JSON/id 开销
-调用次数 ≈ N
-费用 ≈ 输入 tokens × 输入单价 + 输出 tokens × 输出单价
-```
-
-当前最容易被低估的三项：
-
-1. **固定提示词和前后文按批重复**：章节越长、批次越多，重复越多。
-2. **UUID 开销**：每句输入和输出都带 36 字符左右的句子 UUID，短句多时占比很高。
-3. **失败重试**：整批 JSON 失败时，下次重跑会再次发送整批；没有“只重试失败句”的机制。
-
-### 2.8 翻译成本风险点
-
-| 风险 | 现状 | 影响 |
-| --- | --- | --- |
-| 自动翻译 | 设置开启后进入章节即触发 | 用户无意打开多章时持续产生费用 |
-| 重复点击 | 服务层未检查同一章是否已有运行中任务 | 可能创建多个任务、重复调用 |
-| 单句重译 | 不查缓存 | 同一句反复重译无法省钱 |
-| 批次边界 | 按字符数而非 token | 批次过小则调用多，过大则输出截断/失败 |
-| 输出上限 | 使用模型配置的固定 max_tokens | 模型配置过大不直接多扣费，但截断/失败会导致重跑 |
-| 提示词版本 | 译文写入时固定 `promptVersion: 1` | 费用和译文无法准确归因到实际提示词版本 |
-| 缓存失效 | 整段提示词参与 key | 微小上下文变化即 miss |
-| 缓存增长 | 无清理策略 | 本地数据库持续变大 |
-
-## 3. 章节知识抽取机制
-
-### 3.1 触发方式
-
-当前从书籍详情页的章节操作触发，每章创建一条 `knowledge_extraction` 任务，任务 total 固定为 3。没有自动批量抽取入口。
-
-### 3.2 章节正文序列化
-
-`_runExtraction` 一次性把整章构造成：
+请求内：
 
 ```json
-[
-  {
-    "paragraph_id": "段落 UUID",
-    "sentences": [
-      {"id": "句子 UUID", "text": "原文句子"}
-    ]
-  }
-]
+{"id": 1, "text": "原文"}
 ```
 
-这个 JSON 会分别放进实体、关系、事件三个提示词。没有分块、截断、token 预算或上下文窗口检查。
+模型返回：
 
-### 3.3 三次调用
+```json
+{"id": 1, "text": "译文"}
+```
 
-#### 调用 1：实体抽取
+应用只在本地维护 `1..N → sentence UUID` 映射；数据库中的 UUID 不变。解析同时兼容 `id/i` 与 `text/t`，也兼容旧提示词。
 
-- 提示词：`entity_extract`
-- 输入：书名、章节名、整章 `paragraphs_json`
-- 输出：`entities[]`，每个实体包含名称、类型、别名、简介、mentions
-- 写入：
-  - `entities`：按 canonical_name 或 aliases LIKE 查重，找不到才创建
-  - `entity_mentions`：按 entity/book/chapter/quote 去重
-- 进度更新到 38%
+### 1.4 上下文策略
 
-#### 调用 2：关系抽取
+- 默认只带前后各一句。
+- 当前句较长（≥80 字）或以“其、此、是、彼、故、然、則、而、曰、蓋、夫”等开头时，才增加相邻段落的一小段。
+- 前后文合计限制在约 700 字符。
+- 固定规则在前、变化的原文在后，便于 Provider 自动前缀缓存。
 
-- 提示词：`relation_extract`
-- 输入：书名、章节名、**整章正文再次发送**、`entities_json`
-- `entities_json` 来自 `listEntities()`：
-  - 全局实体表
-  - `updated_at DESC`
-  - 最多 300 条
-  - 包含其他书/其他章节的实体
-- 输出：`relations[]`
-- 写入：
-  - `entity_relations`：按 from/to/type 去重（全局去重，不限章节）
-  - `relation_sources`：关联当前章节证据
-- 进度更新到 70%
+### 1.5 逐句缓存
 
-#### 调用 3：事件抽取
+表：`translation_sentence_cache`。
 
-- 提示词：`event_extract`
-- 输入：书名、章节名、**整章正文第三次发送**
-- 输出：`events[]`，含时间、参与者、证据
-- 写入：
-  - `historical_events`
-  - `event_participants`
-  - `event_sources`
-- 任务完成，进度 100%
-
-### 3.4 成本构成
-
-对一章正文 token 数 `C`、提示词固定开销 `E`：
+缓存 Key：
 
 ```text
-当前知识抽取输入 ≈ 3C + 3E + 实体列表 tokens（关系调用额外）
-当前知识抽取输出 ≈ 实体 JSON + 关系 JSON + 事件 JSON
-调用次数 = 3
+sha256(
+  原文 Hash |
+  上下文 Hash |
+  模型显示名 |
+  Prompt 版本 |
+  缓存策略版本
+)
 ```
 
-主要浪费：
+策略版本当前为 2。逐句缓存解决了“批次边界改变导致整批缓存失效”的问题。
 
-1. 同一章正文发送三遍。
-2. 关系调用携带全局实体列表，很多与本批次无关。
-3. 没有“已抽取”跳过；重复点击同一章会再次完整调用 3 次。
-4. 事件没有幂等键，重复抽取可能产生重复事件。
-5. 长章节可能超过上下文或输出上限，导致整次任务失败；再次点击又会重复前两次调用。
+单句重译：
 
-### 3.5 数据一致性注意事项
+- 默认 `useCache=true`：命中则直接写回，不调用 API。
+- 阅读器“强制重译”按钮调用 `useCache=false`：绕过缓存，产生新请求。
 
-- 实体和提及有去重；关系按 from/to/type 去重；事件没有唯一约束。
-- 关系已存在时直接跳过，不会补充新的 `relation_sources`。章节内容变化后重新抽取，旧关系证据可能不会更新。
-- 三次调用不是一个大事务：第三次失败时，前两次写入的实体/关系会保留，任务标记失败。
-- 任务中断后没有断点续跑；重新开始会从第一次调用重新执行。
+### 1.6 批次缓存
 
-## 4. 成本可观测性缺口
+表：`translation_cache`。
 
-当前应用不能直接回答这些问题：
-
-- 这一章翻译花了多少输入/输出 token？
-- 知识抽取三次调用各花了多少？
-- 哪些章节重复抽取了？
-- 缓存命中了多少次、节省了多少？
-- 现在用的模型每百万 token 多少钱？
-- 这本书累计花了多少钱？
-
-原因：
-
-- `AiJsonClient.chat` 只返回文本，没有读取 Provider 返回的 `usage`。
-- `translation_cache` 不记录命中统计和节省 token。
-- `tasks` 只记录模型 label、进度、完成/失败数，没有 token/费用字段。
-- 没有模型价格配置。
-
-Provider 用量字段参考：
-
-- OpenAI / OpenAI 兼容：`usage.prompt_tokens`、`usage.completion_tokens`、`usage.total_tokens`，部分模型有 `prompt_tokens_details.cached_tokens`
-- Anthropic：`usage.input_tokens`、`usage.output_tokens`、`usage.cache_read_input_tokens`、`usage.cache_creation_input_tokens`
-- Gemini（OpenAI 兼容）：通常也有 `usage`
-- Ollama：`prompt_eval_count`、`eval_count`
-
-建议新增：
+Key：
 
 ```text
-tasks:
-  input_tokens
-  output_tokens
-  cached_tokens
-  estimated_cost
-  usage_json
-
-ai_usage（更灵活，也可以按调用记录）:
-  id, task_id, purpose, model, prompt_tokens, output_tokens,
-  cached_tokens, estimated_cost, created_at
+sha256(模型 label | Prompt 版本 | 缓存策略版本 | 完整渲染后的 Prompt)
 ```
 
-并在任务中心/设置页展示：
+批次缓存和逐句缓存同时存在：逐句命中优先，批次缓存作为完整提示词精确复用的兜底。
 
-- 本次任务 token 与估算费用
-- 本书累计
-- 缓存命中率
-- 每次抽取的章节、调用次数、是否重复
+### 1.7 失败与重试
 
-## 5. 优化方案
+- 模型缺失某句译文：只将该句标记 failed。
+- JSON/网络异常：该批未成功句子标记 failed，任务继续下一批。
+- 下一次任务只选择没有译文/失败的句子，不重复发送已成功句。
+- 失败句不会被原文冒充为译文。
+- 目前同一任务内不做无限自动重试；重试由用户再次创建任务触发，成功结果都会落库/缓存。
 
-### 5.1 P0：先做计量和防止重复调用
+### 1.8 取消与恢复
 
-这些改动风险低，但对成本判断最重要：
+- 每个批次开始前检查任务状态；取消后停止继续请求。
+- 已成功的句子和逐句缓存保留。
+- 暂停任务再次点击翻译入口会恢复；已翻译句子不会再次请求。
 
-1. **采集 usage**
-   - 修改 `AiJsonClient.chat`，返回文本 + usage 的结构，或提供 usage 回调。
-   - 把 usage 写入任务/独立 `ai_usage` 表。
-2. **增加任务去重**
-   - `startChapterTranslation`：同一 `chapterId` 已有 `queued/running` 翻译任务时直接返回该任务，不新建。
-   - `startExtraction`：同一 `chapterId` 已有运行中抽取任务时直接返回。
-   - UI 按钮按任务状态禁用，防止误触重复计费。
-3. **采集缓存命中**
-   - 翻译统计 `cached` 已有计数，继续扩展到 token/费用。
-   - 知识抽取增加“已抽取/未变化”状态。
-4. **费用预估**
-   - 启动翻译/抽取前显示：章节字数、预计批次数、预计输入/输出 token、按当前模型单价的估算费用。
-   - 大章节/整本书操作必须二次确认。
+## 2. 知识抽取调用链
 
-### 5.2 P0：知识抽取改为一次调用
+```text
+BookDetailScreen 章节操作
+        │
+        ▼
+KnowledgeService.startExtraction
+        │
+        ├─ 同章节已有 queued/running/paused 任务：返回或恢复
+        └─ 创建 tasks(type=knowledge_extraction)
+                │
+                ▼
+KnowledgeService._runExtraction
+        │
+        ├─ 解析“知识抽取模型”，未配置时回退“问答模型”
+        ├─ 计算章节 Hash
+        ├─ 章节级状态命中（内容/模型/Prompt/Schema 都一致）
+        │     └─ 直接复用，不调用 API
+        ├─ 按段落边界 + Token 预算分块
+        └─ 对每个块：
+              ├─ 查 knowledge_chunk_cache
+              ├─ 命中：直接应用缓存结果
+              ├─ 未命中：knowledge_extract 联合抽取一次
+              ├─ 缓存块结果
+              ├─ 在事务中应用实体/关系/事件
+              └─ 更新任务进度；达到预算时暂停
+```
 
-最直接的省钱方案：把实体、关系、事件合并成一个 `extract_chapter` 提示词，一次返回：
+### 2.1 联合抽取
+
+新默认提示词：`knowledge_extract`。
+
+一次请求同时返回：
 
 ```json
 {
-  "entities": [],
-  "relations": [],
-  "events": []
+  "entities": [
+    {"id": 1, "name": "张三", "type": "person", "aliases": [], "evidence": [1]}
+  ],
+  "relations": [
+    {"from": 1, "to": 2, "type": "君臣关系", "evidence": [1]}
+  ],
+  "events": [
+    {
+      "name": "某事件",
+      "type": "war",
+      "time": null,
+      "year": null,
+      "precision": "unknown",
+      "participants": [1, 2],
+      "evidence": [2]
+    }
+  ]
 }
 ```
 
-预期：
+规则：
 
-- 调用次数：3 → 1
-- 整章正文发送次数：3 → 1
-- 输入 token 大致降到原来的三分之一左右（还要加上输出结构开销）
-- 少两次提示词固定开销和两次网络延迟
+- `id` 是本块内的实体短索引。
+- `evidence` 是本块内的句子短索引，应用根据索引读取真实原文。
+- 关系、事件必须有证据；没有有效证据的关系/事件不会写入。
+- 不要求模型输出人物介绍、原文摘录或冗长解释。
+- 古籍原文 UUID 不进入 Prompt，也不要求模型返回。
 
-风险：
+### 2.2 分块
 
-- 单次输出可能很长，章节很大时容易截断。
-- 需要重新设计 JSON schema 和容错。
-- 关系抽取需要实体结果；在同一次响应中让模型同时输出实体和关系通常可行，但质量需要用真实章节验证。
+`_buildChunks`：
 
-更稳妥的过渡方案：
-
-```text
-实体抽取（1 次）
-  → 关系 + 事件合并（1 次）
-```
-
-先降到 2 次调用，风险和输出长度都更可控。
-
-### 5.3 P0：知识抽取跳过与结果缓存
-
-增加章节级抽取指纹：
+- 默认按段落边界累积。
+- 单段超过预算时按句子切分。
+- Token 预算：
 
 ```text
-chapter_hash = sha256(章节原文)
-extraction_key = chapter_hash + prompt_version + model_label
+inputBound = max(900, contextWindow - maxOutputTokens - 1200)
+outputBound = max(900, maxOutputTokens × 2)
+blockBudget = max(900, min(5000, inputBound, outputBound))
 ```
 
-表中记录：
+- 当前估算器：CJK 字符按 1 token，其他字符按 4 字符/token。
+- 同一章节的块索引稳定；内容 Hash 变化后只重新处理变化的块。
+
+### 2.3 章节级跳过
+
+表：`knowledge_extraction_state`。
+
+保存：
+
+- 章节内容 Hash
+- 模型显示名
+- Prompt 版本
+- Schema 版本
+- 状态
+
+内容、模型、Prompt、Schema 全部一致且状态为 completed 时，重复点击不再调用 API。模型或提示词变化不会删除已有知识数据，只会重新抽取并依靠实体/关系/事件去重合并。
+
+### 2.4 块级缓存与断点
+
+表：`knowledge_chunk_cache`。
+
+Key：
 
 ```text
-chapter_extractions:
-  chapter_id
-  extraction_key
-  status
-  model
-  prompt_version
-  created_at
-  updated_at
+chapter_id + chunk_index + content_hash + model_label +
+prompt_version + schema_version
 ```
 
-行为：
+- 每块成功后立即缓存并落库。
+- 某块失败时任务可以 partial 结束；下次执行只重新请求失败的块。
+- 块结果在数据库事务中应用，单块失败不会留下半块数据。
+- 当前没有应用重启后自动继续执行；用户再次点击抽取会复用缓存。
 
-- 同章节、同模型、同提示词版本、同文本：直接显示“已抽取”，不调用 API。
-- 章节内容或提示词变化：允许重新抽取。
-- 重新抽取前删除或版本化本章的旧事件/关系证据，避免重复数据。
-- 事件增加幂等键，例如 `sha256(name + time_raw + quote + book_id)`，重复抽取不重复插入。
+### 2.5 实体复用
 
-这一步对“用户反复点击”和“多个章节重复抽取”的节省通常是最直接的，可能直接省掉 100% 的重复调用。
+- 新实体优先按 `canonical_name` 精确匹配。
+- 再按 `aliases` 字段中的完整别名匹配。
+- 命中已有实体时只补充缺失别名/朝代，不覆盖已有正式介绍。
+- 没有多候选 AI 消歧，避免为消歧额外付费；遇到无法确定的同名人物按本地精确/别名结果处理。
 
-### 5.4 P1：翻译批量和提示词优化
+### 2.6 关系去重
 
-#### 5.4.1 使用短 ID
+- 以 `from_entity_id + to_entity_id + relation_type` 去重。
+- 已存在关系时继续追加新的 `relation_sources`，不会丢弃新史料证据。
+- 关系仍默认 `inferred`，等待人工审核。
 
-当前句子 UUID 同时出现在输入和输出中。建议：
+### 2.7 事件去重
+
+`historical_events.fingerprint` + 唯一索引。
+
+指纹组成：
 
 ```text
-输入：{"i": 1, "t": "原文"}
-输出：{"i": 1, "t": "译文"}
-应用本地维护 1..N -> sentence_id 的映射。
+规范化事件名
++ 事件类型
++ year / time
++ 排序后的参与者名称
 ```
 
-对短句密集的章节，UUID 的输入/输出开销会非常明显；短 ID 也能降低 JSON 解析失败率。
+如果时间、参与者都缺失，则把首条证据原文 Hash 纳入指纹，避免同名但无时间的事件被错误合并。
 
-#### 5.4.2 按 token 而非字符分批
+- 相同指纹：复用事件，追加新的 `event_sources` 和参与者。
+- 不同指纹：保留为不同事件，支持“同名不同事”。
+- 旧数据 fingerprint 为空；仅在时间/类型/年份匹配时做有限回退匹配，避免按名称粗暴去重。
+- 跨章节/跨书的同一事件会保留全部证据来源。
 
-根据模型上下文窗口和 `maxOutputTokens` 计算预算：
+### 2.8 事务边界
+
+- 实体、关系、事件在单个块内的事务中写入。
+- 块与块之间不是一个大事务；前面成功的块会保留。
+- 失败块不写缓存；再次执行时只补失败块。
+- 任务状态：`queued / running / completed / partial / failed / cancelled / paused`。
+
+## 3. 统一计量与费用
+
+### 3.1 数据表
+
+`ai_usage`：
 
 ```text
-input_budget  = context_window - output_budget - safety_margin
-output_budget ≈ 输入原文 token 的 1.5~2.5 倍（译文通常比原文长）
-batch_chars   ≈ input_budget 对应的字符数
+id, task_id, task_type, provider_id, provider_name,
+model_id, model_name,
+input_tokens, output_tokens,
+cache_read_tokens, cache_write_tokens,
+total_tokens, cost, duration_ms,
+status, retry_count, is_estimated, error, created_at
 ```
 
-建议提供“经济/均衡/质量”三档批量：
+`tasks` 新增聚合列：
 
-- 经济：更大批次，减少固定开销，但更容易输出截断
-- 均衡：当前约 2200 字或略大
-- 质量：小批次 + 更完整上下文
+```text
+input_tokens, output_tokens,
+cache_read_tokens, cache_write_tokens,
+cost, requests
+```
 
-#### 5.4.3 压缩上下文
+### 3.2 usage 归一化
 
-当前每批携带前 2 句 + 前一段、后 2 句 + 后一段。建议：
+- OpenAI / OpenAI 兼容：`prompt_tokens`、`completion_tokens`、`prompt_tokens_details.cached_tokens`
+- Anthropic：`input_tokens`、`output_tokens`、`cache_read_input_tokens`、`cache_creation_input_tokens`
+- Ollama：`prompt_eval_count`、`eval_count`
+- 无 usage：使用 `estimateTokens`，并设置 `is_estimated=1`
 
-- 默认只带前后各 1 句，段落只在歧义/长难句时加入。
-- 或把前后文截断到固定字符上限（例如每侧 400 字）。
-- 对超长段落，不要整段塞入，只取与当前句相邻的 2~3 句。
+### 3.3 费用
 
-#### 5.4.4 提示词压缩
+模型表新增：
 
-- 精简翻译规则，去掉重复表述。
-- 输出字段使用短名，解析层做兼容。
-- 禁止模型输出 null 字段（提示词明确“省略 null 字段”）。
-- 不要求模型返回它不需要的 id/字段。
+```text
+input_price, output_price,
+cache_read_price, cache_write_price
+```
 
-#### 5.4.5 单句重译使用缓存
+单位为“每百万 Token”，币种由用户自行统一。缓存单价为 0 时按输入单价兜底估算；所有单价为 0 时费用为 0，并在 UI 提示“未配置模型单价”。
 
-`retranslateSentence` 应先构造与批量翻译相同的缓存键并查 `translation_cache`。如果用户反复重译同一句，至少能命中完全相同请求。
+计算：
 
-#### 5.4.6 部分失败只重试失败句
+```text
+费用 =
+  input_tokens × input_price
+  + output_tokens × output_price
+  + cache_read_tokens × cache_read_price
+  + cache_write_tokens × cache_write_price
+  ÷ 1,000,000
+```
 
-- 当前整批异常时整批标记 failed，下次重跑整批。
-- 建议解析失败时尝试从返回文本中恢复可解析的条目；只把缺失/失败的句子重试。
-- 失败重试设置次数上限，避免无限消耗。
+### 3.4 UI
 
-#### 5.4.7 控制自动翻译
+任务中心顶部“AI 用量”：
 
-- 自动翻译默认关闭，或在设置中明确提示“会增加 API 费用”。
-- 自动翻译只对当前章节、且仅在用户停留超过一定时间后触发；不要预取下一章。
-- 失败/取消的章节不要自动无限重试。
+- 累计调用次数
+- 累计输入/输出/缓存 Token
+- 累计费用
+- 按任务类型统计
+- 按模型统计
 
-### 5.5 P1：关系/事件候选过滤
+每个任务卡：
 
-当前关系抽取和事件抽取都把整章正文发送。可以先做本地候选筛选：
+- 请求次数
+- 输入/输出 Token
+- 缓存读取 Token
+- 费用
+- 错误和结果计数
 
-**关系抽取**
+设置 → AI 模型：
 
-1. 从实体抽取结果中拿到当前章节的实体及提及位置。
-2. 只把包含至少两个实体的段落/句子送入关系抽取。
-3. 对跨章节关系，只带当前章节实体 + 已有实体中与这些实体有关系的少量邻居。
+- 模型编辑增加四个单价字段。
+- 成本控制增加“单次任务费用上限”。
+- 达到上限时任务暂停，错误提示包含当前费用和上限。
 
-**事件抽取**
+## 4. 任务去重、取消与恢复
 
-1. 用本地规则筛选包含时间词、纪年、战争/任命/死亡/灾害等触发词的段落。
-2. 只对候选段落做事件抽取，或按段落分块抽取。
-3. 保留段落上下文，避免断章取义。
+- 翻译任务按 `chapter_id + type=translation` 查重。
+- 知识抽取任务按 `chapter_id + type=knowledge_extraction` 查重。
+- 运行中任务直接返回已有任务，不创建新任务。
+- 暂停任务再次启动时恢复，已成功句子/块不重复计费。
+- 取消任务在批次/块边界生效；当前已发出的请求可能仍会计费并记录 usage。
+- 任务状态和实际执行状态以 `tasks` 表为准。
 
-这会把“整章三次发送”变成“少量候选段落”，通常比单纯合并调用更省。
+## 5. 数据库变化
 
-### 5.6 P1：模型路由
+新增表：
 
-当前只有两个默认模型：
+- `ai_usage`
+- `translation_sentence_cache`
+- `knowledge_chunk_cache`
+- `knowledge_extraction_state`
 
-- 默认翻译模型
-- 默认问答模型（知识抽取也用它）
+新增/变更列：
 
-建议允许按任务配置：
+- `tasks.input_tokens/output_tokens/cache_read_tokens/cache_write_tokens/cost/requests`
+- `ai_models.input_price/output_price/cache_read_price/cache_write_price/is_default_extraction`
+- `historical_events.fingerprint` + 唯一索引
 
-| 任务 | 建议模型档位 | 原因 |
-| --- | --- | --- |
-| 逐句初译 | 低价/高吞吐模型 | 量大、结构化程度高 |
-| 翻译审校 | 中高价模型 | 只处理疑难/失败句 |
-| 实体抽取 | 低价模型 | 主要是识别和列举 |
-| 关系/事件抽取 | 中高价模型 | 需要推理和史料理解 |
-| 阅读助手 | 高质量模型 | 用户直接阅读答案 |
+兼容策略：
 
-如果 Provider 支持，给每个任务单独选择模型，并把价格写入模型配置。价格差异通常远大于提示词微调带来的收益。
+- `AppDatabase._migrate` 使用 `PRAGMA table_info` 检查旧库，存在则跳过 `ALTER TABLE`。
+- 新表使用 `CREATE TABLE IF NOT EXISTS`。
+- 旧书籍、译文、实体、关系、事件数据不删除。
+- 新缓存表可重建；正式翻译/知识数据不会因缓存清理而丢失。
+- 旧任务没有 Token 字段，显示为 0。
 
-### 5.7 P1/P2：批量 API 与 Prompt Caching
+## 6. 测试与实测
 
-如果使用 OpenAI、Anthropic、Gemini 等支持批处理/缓存的服务：
+自动化测试：
 
-- **Batch API**：非实时翻译/抽取可以走批量接口，通常有显著折扣。知识抽取和整本书翻译非常适合异步批量。
-- **Prompt Caching**：把固定规则放在前缀，把变化的章节内容放在后面；部分 Provider 会自动缓存重复前缀。需要注意各家的缓存最小长度、TTL 和计价方式。
-- 当前 `AiJsonClient` 是单条 user message，未来可拆成 system + user，并记录 cache read/write tokens。
+- `app/test/ai_pipeline_test.dart`
+  - 本地 Mock OpenAI 兼容服务
+  - 翻译请求与任务用量
+  - 逐句缓存命中
+  - 单句缓存与强制重译
+  - 任务去重
+  - 长章节分块联合抽取
+  - 实体复用、关系/事件落库
+  - 事件跨块证据合并
+  - 重复抽取章节跳过 API
+  - 按类型/模型用量汇总
+  - 预算超限暂停
 
-### 5.8 P2：分块与断点续跑
+- 原有测试继续通过：导入、翻译保护、批注/书签/进度、备份恢复、桌面/移动应用壳。
+- 当前共 11 项测试通过。
 
-对超长章节：
+原有真实数据量参考（用于估算）：
 
-- 按段落/字符预算分块（例如 4,000~6,000 字），块间保留少量重叠。
-- 每块完成后写入任务检查点；失败只重跑当前块。
-- 知识抽取的任务 total 从固定 3 改为“实际块数 × 阶段数”。
-- 合并结果时按实体名、关系 from/to/type、事件幂等键去重。
+- 3,337 章
+- 1,416,431 句
+- 28,165,934 原文字符
+- 单章最大 40,000 字符
+- 旧方案整书知识抽取约 10,011 次请求（3 次/章）
+- 新方案正常章节约 3,337 次请求，长章节按块增加；重复抽取可跳过
+- 旧翻译按 2200 字分批约 14,520 次请求；新批次预算随模型输出能力变化
 
-这样虽然可能增加少量重叠 token，但能避免长章节整批失败后从头重跑。
+## 7. 已知限制与后续优化
 
-## 6. 建议的实施顺序
+### 7.1 精确 Tokenizer
 
-### 阶段 1：立即做（低成本、可量化）
+当前只在 Provider 返回 usage 时使用真实 Token；分块预算和无 usage 的计量使用保守估算。后续可按模型配置 tokenizer 或接入 Provider token count 接口。
 
-1. 采集 Provider usage，记录每次请求 token 和估算费用。
-2. 任务中心显示本次任务的输入/输出 token、缓存命中和费用。
-3. 翻译/知识抽取任务按章节去重，运行中禁止重复创建。
-4. 知识抽取增加“已抽取”判断和章节文本哈希，重复点击直接复用结果。
-5. 单句重译接入翻译缓存。
+### 7.2 Prompt Caching
 
-### 阶段 2：结构性省钱
+固定规则已经在 Prompt 前部、动态原文在后部，但应用没有显式发送 Provider 的缓存控制字段。部分 Provider 会自动做前缀缓存；是否命中取决于其规则。后续可对支持的 Provider 增加缓存标记并记录缓存读写 Token。
 
-1. 知识抽取从 3 次调用改为 1 次（或先改为 2 次：实体 + 关系/事件）。
-2. 翻译使用短 ID、按 token 分批、压缩上下文。
-3. 关系/事件先做本地候选段落过滤。
-4. 增加任务级费用预估和“经济/均衡/质量”模式。
+### 7.3 Batch API
 
-### 阶段 3：规模化优化
+尚未实现。整本书翻译/抽取非常适合异步 Batch API，可在不改变现有实时流程的前提下作为可选任务类型。
 
-1. 模型按任务路由，翻译/实体使用低价模型。
-2. 批量 API 支持。
-3. Prompt Caching 支持。
-4. 分块断点续跑、事件幂等和抽取版本化。
-5. 章节级成本报表和预算上限（超过预算自动暂停）。
+### 7.4 预算粒度
 
-## 7. 估算模板
+当前只有“单次任务费用上限”。尚未提供单章节、单本书预算；可在设置中增加多级预算，并在启动前根据历史 token 估算费用。
 
-在接入真实 usage 前，可以用下面的表格做粗算。中文 token 数受 tokenizer 影响，建议用“字符数 × 0.7~1.0”做保守估算，最终以 Provider 返回 usage 为准。
+### 7.5 自动恢复
 
-### 7.1 章节翻译
+应用重启后不会自动重新启动 running 任务；用户再次点击会利用句子/块缓存继续。后续可在任务启动时检测未完成任务并提示恢复。
 
-| 变量 | 含义 | 示例 |
-| --- | --- | --- |
-| `chars` | 本章待译原文字符数 | 20,000 |
-| `batch_chars` | 每批字符数 | 2,200 |
-| `batches` | `ceil(chars / batch_chars)` | 10 |
-| `prompt_overhead` | 每批固定提示词+上下文 tokens | 600 |
-| `source_tokens` | 原文 tokens（约 chars × 0.8） | 16,000 |
-| `output_tokens` | 译文+JSON tokens | 12,000~20,000 |
-| `input_tokens` | `batches × overhead + source` | 22,000 |
-| `cost` | input×单价 + output×单价 | 按模型价目表计算 |
+### 7.6 实体消歧
 
-### 7.2 知识抽取
+当前只做本地精确/别名匹配，没有多候选 AI 消歧。若未来加入，应只在候选冲突时调用，并记录额外费用。
 
-| 变量 | 当前 | 单次调用后 |
-| --- | --- | --- |
-| API 调用数 | 3 | 1 |
-| 整章正文发送次数 | 3 | 1 |
-| 固定提示词开销 | 3 份 | 1 份 |
-| 全局实体列表 | 关系调用 1 份 | 可只带本章实体 |
-| 重复抽取 | 每次 3 次 | 可由哈希跳过 |
-| 长章节失败成本 | 重跑 3 次 | 分块后只重跑失败块 |
+### 7.7 事件指纹
 
-### 7.3 量级示例
+指纹是启发式：同名、同时间、同参与者可能合并；不同史料的不同表述可能保持为不同事件。当前策略偏保守，避免错误合并，但可能保留少量重复事件。
 
-用本地实测的一套 3337 章史书数据做量级参考（不是实际账单）：
+### 7.8 备份
 
-| 指标 | 实测值 |
-| --- | ---: |
-| 章节数 | 3,337 |
-| 句子数 | 1,416,431 |
-| 原文字符数 | 28,165,934 |
-| 单章最大字符数 | 40,000 |
-| 按每章 2,200 字分批的批次数 | 14,520 |
+`ai_usage` 和抽取/翻译缓存暂未纳入备份 ZIP。正式译文、实体、关系、事件仍在数据库备份中；缓存可在新设备重建。
 
-由此可以直观看到：
+### 7.9 模型路由
 
-- 按当前翻译策略，整本书大约需要 **14,520 次翻译请求**；每次请求还会重复携带提示词和上下文。
-- 按当前知识抽取策略，整本书需要 **10,011 次请求**（3,337 章 × 3 次），整章正文累计发送约 8,450 万字符。
-- 如果改成单次调用，知识抽取请求数降到 3,337 次，整章正文发送量降到约 2,820 万字符；再叠加“已抽取跳过”，重复抽取成本可以降到 0。
-- 分块不是越细越好：分块会增加请求数和重叠正文，但可以避免 40,000 字长章节整批失败后重跑 3 次。
+支持翻译、问答、知识抽取三个默认模型；尚未做到实体/关系/事件分别使用不同模型。由于当前是联合抽取，一个知识抽取模型即可覆盖整个任务。
 
-实际费用仍需以 Provider 返回的 usage 和模型单价计算。中文按“1 字符 ≈ 0.7~1.0 token”做保守预算，最终以分词器为准。
+### 7.10 并发与重试
 
-## 8. 当前实现需要特别记住的边界
+单个任务内部串行处理批次/块，没有无限并发；但不同章节的任务目前可以同时启动，尚未加入全局任务队列/并发上限。网络失败不会自动重试，由用户再次启动任务，已成功的结果会从缓存复用，不会重复发送。
 
-- 翻译缓存只对“完全相同提示词 + 模型显示名”有效。
-- 知识抽取没有任何缓存。
-- 知识抽取固定 3 次调用，关系提示词会带最多 300 个全局实体。
-- 任务没有服务层去重，重复点击可能重复计费。
-- 没有 token 用量，因此现在无法给出准确的“每章成本”。
-- 失败没有精细重试；整批失败会在下次重跑整批。
-- 事件没有唯一约束，重复抽取可能产生重复事件。
-- 自动翻译开启后，进入未完成章节会自动发起调用，需谨慎。
+## 8. 成本优化检查清单
 
-后续如果实现上述优化，应同步更新本文和 `docs/AI_PROMPTS.md`、`docs/ARCHITECTURE.md` 中的调用链说明。
+- [x] 记录真实 usage，缺失时标记估算
+- [x] 任务级 Token/费用聚合
+- [x] 任务去重
+- [x] 翻译逐句缓存
+- [x] 翻译短 ID
+- [x] 翻译批次按模型预算
+- [x] 知识抽取联合调用
+- [x] 知识章节缓存/块缓存
+- [x] 长章节分块和失败块重试
+- [x] 实体复用、关系证据合并
+- [x] 事件指纹去重
+- [x] 单次任务预算暂停
+- [x] 知识抽取模型/问答模型回退
+- [ ] 精确 tokenizer 和 token count API
+- [ ] Provider 原生 Prompt Caching
+- [ ] Batch API
+- [ ] 单章节/单本书预算
+- [ ] 应用重启自动恢复任务
+- [ ] 多候选实体 AI 消歧
+- [ ] 备份 AI 用量与缓存

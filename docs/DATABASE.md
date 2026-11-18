@@ -58,12 +58,18 @@
 
 ### 任务与 AI
 
-- `tasks`：翻译/知识抽取任务、状态、进度、结果。
+- `tasks`：翻译/知识抽取任务、状态、进度、结果、输入/输出 Token、缓存 Token、费用、请求次数。
 - `ai_providers`：服务商名称、类型、基础地址、备注、启用状态。
-- `ai_models`：服务商、模型标识、显示名、上下文、最大输出、超时、能力、默认翻译/问答。
+- `ai_models`：服务商、模型标识、显示名、上下文、最大输出、超时、能力、默认翻译/问答/知识抽取、每百万 Token 单价。
+- `ai_usage`：每次 AI 请求的任务、类型、Provider、模型、Token、缓存 Token、费用、耗时、状态、重试次数和估算标记。
+- `translation_sentence_cache`：逐句翻译缓存，Key 包含原文/上下文 Hash、模型、Prompt 版本和策略版本。
+- `knowledge_chunk_cache`：知识抽取块级缓存，Key 包含章节、块索引、内容 Hash、模型、Prompt 版本和 Schema 版本。
+- `knowledge_extraction_state`：章节级抽取状态，用于内容/模型/Prompt/Schema 未变时跳过 API。
 - `prompt_templates`：提示词 key、版本、名称、说明、模板、变量、激活状态。
 - `assistant_sessions` / `assistant_messages`：AI 助手会话与消息、引用、claims。
 - `app_settings`：本地键值设置。
+
+`historical_events.fingerprint` 用于事件去重，唯一索引只为非空指纹建立。
 
 ### 全文检索
 
@@ -125,4 +131,13 @@ backup.json
 
 ## 5. 迁移
 
-当前数据库版本为 1。启动时执行幂等的 `CREATE TABLE IF NOT EXISTS` 与 `CREATE INDEX IF NOT EXISTS`，为旧快照补齐新增表。后续结构变更应引入显式版本迁移。
+数据库仍使用版本 1 的向前兼容策略：
+
+- 启动时执行幂等的 `CREATE TABLE IF NOT EXISTS` 与 `CREATE INDEX IF NOT EXISTS`。
+- `AppDatabase._migrate` 通过 `PRAGMA table_info` 检查旧库，按需执行 `ALTER TABLE ADD COLUMN`：
+  - `tasks.input_tokens/output_tokens/cache_read_tokens/cache_write_tokens/cost/requests`
+  - `ai_models.input_price/output_price/cache_read_price/cache_write_price/is_default_extraction`
+  - `historical_events.fingerprint`
+- 旧记录新列使用 0、空字符串或 NULL 默认值，不删除旧数据。
+- 新增缓存表可以重建；翻译结果、实体、关系、事件和史料证据不会被缓存清理影响。
+- 备份 ZIP 仍包含正式业务表和书籍文件；`ai_usage` 与缓存表暂不进入备份。

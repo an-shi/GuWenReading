@@ -239,6 +239,7 @@ const List<String> schemaStatements = [
     time_precision TEXT NOT NULL DEFAULT 'unknown',
     time_note TEXT,
     status TEXT NOT NULL DEFAULT 'extracted',
+    fingerprint TEXT,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
   )
@@ -275,6 +276,12 @@ const List<String> schemaStatements = [
     total INTEGER NOT NULL DEFAULT 0,
     completed INTEGER NOT NULL DEFAULT 0,
     failed_count INTEGER NOT NULL DEFAULT 0,
+    input_tokens INTEGER NOT NULL DEFAULT 0,
+    output_tokens INTEGER NOT NULL DEFAULT 0,
+    cache_read_tokens INTEGER NOT NULL DEFAULT 0,
+    cache_write_tokens INTEGER NOT NULL DEFAULT 0,
+    cost REAL NOT NULL DEFAULT 0,
+    requests INTEGER NOT NULL DEFAULT 0,
     error TEXT,
     result TEXT NOT NULL DEFAULT '{}',
     created_at TEXT NOT NULL,
@@ -307,6 +314,11 @@ const List<String> schemaStatements = [
     supports_json INTEGER NOT NULL DEFAULT 1,
     is_default_translation INTEGER NOT NULL DEFAULT 0,
     is_default_chat INTEGER NOT NULL DEFAULT 0,
+    is_default_extraction INTEGER NOT NULL DEFAULT 0,
+    input_price REAL NOT NULL DEFAULT 0,
+    output_price REAL NOT NULL DEFAULT 0,
+    cache_read_price REAL NOT NULL DEFAULT 0,
+    cache_write_price REAL NOT NULL DEFAULT 0,
     enabled INTEGER NOT NULL DEFAULT 1,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
@@ -353,6 +365,71 @@ const List<String> schemaStatements = [
   CREATE TABLE IF NOT EXISTS app_settings (
     key TEXT PRIMARY KEY,
     value TEXT NOT NULL
+  )
+  ''',
+  '''
+  CREATE TABLE IF NOT EXISTS ai_usage (
+    id TEXT PRIMARY KEY,
+    task_id TEXT,
+    task_type TEXT NOT NULL,
+    provider_id TEXT,
+    provider_name TEXT,
+    model_id TEXT,
+    model_name TEXT,
+    input_tokens INTEGER NOT NULL DEFAULT 0,
+    output_tokens INTEGER NOT NULL DEFAULT 0,
+    cache_read_tokens INTEGER NOT NULL DEFAULT 0,
+    cache_write_tokens INTEGER NOT NULL DEFAULT 0,
+    total_tokens INTEGER NOT NULL DEFAULT 0,
+    cost REAL NOT NULL DEFAULT 0,
+    duration_ms INTEGER NOT NULL DEFAULT 0,
+    status TEXT NOT NULL DEFAULT 'success',
+    retry_count INTEGER NOT NULL DEFAULT 0,
+    is_estimated INTEGER NOT NULL DEFAULT 0,
+    error TEXT,
+    created_at TEXT NOT NULL
+  )
+  ''',
+  'CREATE INDEX IF NOT EXISTS idx_ai_usage_created ON ai_usage(created_at DESC)',
+  'CREATE INDEX IF NOT EXISTS idx_ai_usage_task ON ai_usage(task_id)',
+  'CREATE INDEX IF NOT EXISTS idx_ai_usage_type ON ai_usage(task_type, created_at DESC)',
+  'CREATE INDEX IF NOT EXISTS idx_ai_usage_model ON ai_usage(model_id, created_at DESC)',
+  '''
+  CREATE TABLE IF NOT EXISTS translation_sentence_cache (
+    cache_key TEXT PRIMARY KEY,
+    source_hash TEXT NOT NULL,
+    context_hash TEXT NOT NULL,
+    model_label TEXT NOT NULL,
+    prompt_version INTEGER NOT NULL,
+    translated_text TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    last_used_at TEXT NOT NULL
+  )
+  ''',
+  'CREATE INDEX IF NOT EXISTS idx_translation_sentence_model ON translation_sentence_cache(model_label, prompt_version)',
+  '''
+  CREATE TABLE IF NOT EXISTS knowledge_chunk_cache (
+    chapter_id TEXT NOT NULL,
+    chunk_index INTEGER NOT NULL,
+    content_hash TEXT NOT NULL,
+    model_label TEXT NOT NULL,
+    prompt_version INTEGER NOT NULL,
+    schema_version INTEGER NOT NULL,
+    result_json TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'completed',
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY (chapter_id, chunk_index, content_hash, model_label, prompt_version, schema_version)
+  )
+  ''',
+  '''
+  CREATE TABLE IF NOT EXISTS knowledge_extraction_state (
+    chapter_id TEXT PRIMARY KEY,
+    content_hash TEXT NOT NULL,
+    model_label TEXT NOT NULL,
+    prompt_version INTEGER NOT NULL,
+    schema_version INTEGER NOT NULL,
+    status TEXT NOT NULL,
+    updated_at TEXT NOT NULL
   )
   ''',
 ];

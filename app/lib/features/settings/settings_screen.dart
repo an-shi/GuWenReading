@@ -130,6 +130,7 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
 
   // ------------------------------------------------------------------- AI tab
   Widget _aiTab(ThemeData theme) {
+    final settings = ref.watch(settingsProvider);
     return ListView(
       padding: const EdgeInsets.fromLTRB(20, 8, 20, 40),
       children: [
@@ -208,7 +209,8 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
                           '${model.name} · ${model.contextWindow} 上下文 · ${model.maxOutputTokens} 输出'
                           '${model.supports('vision') ? ' · 多模态' : ''}'
                           '${model.isDefaultTranslation ? ' · 默认翻译' : ''}'
-                          '${model.isDefaultChat ? ' · 默认问答' : ''}',
+                          '${model.isDefaultChat ? ' · 默认问答' : ''}'
+                          '${model.isDefaultExtraction ? ' · 默认抽取' : ''}',
                         ),
                         trailing: Wrap(
                           spacing: 4,
@@ -228,6 +230,35 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
                       ),
                   ],
                 ),
+        ),
+        const SizedBox(height: 14),
+        _SectionCard(
+          title: '成本控制',
+          subtitle: '单次 AI 任务的实际或估算费用达到上限时自动暂停；0 表示不限制。',
+          action: OutlinedButton.icon(
+            onPressed: _editTaskBudget,
+            icon: const Icon(Icons.savings_outlined),
+            label: const Text('修改上限'),
+          ),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              _InfoRow(
+                label: '单次任务上限',
+                value: settings.aiTaskBudget > 0
+                    ? settings.aiTaskBudget.toStringAsFixed(4)
+                    : '不限',
+              ),
+              Text(
+                '费用按模型配置的每百万 Token 单价和 Provider 返回的 usage 估算；'
+                '未配置单价的模型费用按 0 计算。',
+                style: theme.textTheme.bodySmall?.copyWith(
+                  color: theme.colorScheme.onSurface.withValues(alpha: 0.45),
+                  height: 1.6,
+                ),
+              ),
+            ],
+          ),
         ),
       ],
     );
@@ -575,6 +606,44 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
   }
 
   // ----------------------------------------------------------------- dialogs
+  Future<void> _editTaskBudget() async {
+    final current = ref.read(settingsProvider).aiTaskBudget;
+    final controller = TextEditingController(
+      text: current > 0 ? current.toString() : '',
+    );
+    final saved = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('单次任务费用上限'),
+        content: TextField(
+          controller: controller,
+          autofocus: true,
+          keyboardType: const TextInputType.numberWithOptions(decimal: true),
+          decoration: const InputDecoration(
+            labelText: '费用上限',
+            hintText: '留空或 0 表示不限制',
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context, false),
+            child: const Text('取消'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(context, true),
+            child: const Text('保存'),
+          ),
+        ],
+      ),
+    );
+    if (saved == true) {
+      final value = double.tryParse(controller.text.trim()) ?? 0;
+      await ref.read(settingsProvider.notifier).setAiTaskBudget(value);
+      if (mounted) setState(() {});
+    }
+    controller.dispose();
+  }
+
   Future<void> _editProvider(AiProviderRecord? provider) async {
     final ai = ref.read(aiSettingsProvider);
     final result = await showDialog<ProviderEditorResult>(
@@ -688,10 +757,21 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
     final timeout = TextEditingController(
       text: '${model?.timeoutSeconds ?? 120}',
     );
+    final inputPrice = TextEditingController(text: '${model?.inputPrice ?? 0}');
+    final outputPrice = TextEditingController(
+      text: '${model?.outputPrice ?? 0}',
+    );
+    final cacheReadPrice = TextEditingController(
+      text: '${model?.cacheReadPrice ?? 0}',
+    );
+    final cacheWritePrice = TextEditingController(
+      text: '${model?.cacheWritePrice ?? 0}',
+    );
     var selectedProvider = providerId;
     var supportsJson = model?.supportsJson ?? true;
     var defaultTranslation = model?.isDefaultTranslation ?? false;
     var defaultChat = model?.isDefaultChat ?? false;
+    var defaultExtraction = model?.isDefaultExtraction ?? false;
     var enabled = model?.enabled ?? true;
     var capabilities = [
       ...(model?.capabilities ?? const ['translation', 'chat']),
@@ -758,6 +838,75 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
                   keyboardType: TextInputType.number,
                   decoration: const InputDecoration(labelText: '超时（秒）'),
                 ),
+                const SizedBox(height: 14),
+                Align(
+                  alignment: Alignment.centerLeft,
+                  child: Text(
+                    '计费单价（每百万 Token，币种自行统一）',
+                    style: theme.textTheme.labelSmall?.copyWith(
+                      color: theme.colorScheme.onSurface.withValues(alpha: 0.5),
+                    ),
+                  ),
+                ),
+                const SizedBox(height: 6),
+                Row(
+                  children: [
+                    Expanded(
+                      child: TextField(
+                        controller: inputPrice,
+                        keyboardType: const TextInputType.numberWithOptions(
+                          decimal: true,
+                        ),
+                        decoration: const InputDecoration(labelText: '输入单价'),
+                      ),
+                    ),
+                    const SizedBox(width: 10),
+                    Expanded(
+                      child: TextField(
+                        controller: outputPrice,
+                        keyboardType: const TextInputType.numberWithOptions(
+                          decimal: true,
+                        ),
+                        decoration: const InputDecoration(labelText: '输出单价'),
+                      ),
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 10),
+                Row(
+                  children: [
+                    Expanded(
+                      child: TextField(
+                        controller: cacheReadPrice,
+                        keyboardType: const TextInputType.numberWithOptions(
+                          decimal: true,
+                        ),
+                        decoration: const InputDecoration(labelText: '缓存读取单价'),
+                      ),
+                    ),
+                    const SizedBox(width: 10),
+                    Expanded(
+                      child: TextField(
+                        controller: cacheWritePrice,
+                        keyboardType: const TextInputType.numberWithOptions(
+                          decimal: true,
+                        ),
+                        decoration: const InputDecoration(labelText: '缓存写入单价'),
+                      ),
+                    ),
+                  ],
+                ),
+                Padding(
+                  padding: const EdgeInsets.only(top: 4),
+                  child: Text(
+                    '留 0 表示未配置；缓存单价留 0 时按输入单价估算。',
+                    style: theme.textTheme.bodySmall?.copyWith(
+                      color: theme.colorScheme.onSurface.withValues(
+                        alpha: 0.42,
+                      ),
+                    ),
+                  ),
+                ),
                 SwitchListTile(
                   contentPadding: EdgeInsets.zero,
                   title: const Text('支持结构化 JSON 输出'),
@@ -817,6 +966,14 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
                 ),
                 SwitchListTile(
                   contentPadding: EdgeInsets.zero,
+                  title: const Text('设为默认知识抽取模型'),
+                  subtitle: const Text('未设置时使用默认问答模型'),
+                  value: defaultExtraction,
+                  onChanged: (value) =>
+                      setDialogState(() => defaultExtraction = value),
+                ),
+                SwitchListTile(
+                  contentPadding: EdgeInsets.zero,
                   title: const Text('启用该模型'),
                   value: enabled,
                   onChanged: (value) => setDialogState(() => enabled = value),
@@ -848,10 +1005,15 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
       contextWindow: int.tryParse(contextWindow.text) ?? 8192,
       maxOutputTokens: int.tryParse(maxOutput.text) ?? 2048,
       timeoutSeconds: int.tryParse(timeout.text) ?? 120,
+      inputPrice: double.tryParse(inputPrice.text.trim()) ?? 0,
+      outputPrice: double.tryParse(outputPrice.text.trim()) ?? 0,
+      cacheReadPrice: double.tryParse(cacheReadPrice.text.trim()) ?? 0,
+      cacheWritePrice: double.tryParse(cacheWritePrice.text.trim()) ?? 0,
       capabilities: capabilities,
       supportsJson: supportsJson,
       isDefaultTranslation: defaultTranslation,
       isDefaultChat: defaultChat,
+      isDefaultExtraction: defaultExtraction,
       enabled: enabled,
     );
     await ref.read(aiSettingsProvider).saveModel(record);

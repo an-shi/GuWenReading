@@ -286,6 +286,7 @@ class AppDatabase {
       ),
     );
     final ftsAvailable = await _ensureFts(db);
+    await _migrate(db);
     return AppDatabase._(db, paths, ftsAvailable: ftsAvailable);
   }
 
@@ -307,10 +308,54 @@ class AppDatabase {
       ),
     );
     final ftsAvailable = await _ensureFts(db);
+    await _migrate(db);
     final paths = await AppPaths.resolve(
       overrideRoot: p.join(Directory.systemTemp.path, 'guwenreader-test'),
     );
     return AppDatabase._(db, paths, ftsAvailable: ftsAvailable);
+  }
+
+  static Future<void> _migrate(Database db) async {
+    const additions = <String, Map<String, String>>{
+      'tasks': {
+        'input_tokens': 'INTEGER NOT NULL DEFAULT 0',
+        'output_tokens': 'INTEGER NOT NULL DEFAULT 0',
+        'cache_read_tokens': 'INTEGER NOT NULL DEFAULT 0',
+        'cache_write_tokens': 'INTEGER NOT NULL DEFAULT 0',
+        'cost': 'REAL NOT NULL DEFAULT 0',
+        'requests': 'INTEGER NOT NULL DEFAULT 0',
+      },
+      'ai_models': {
+        'is_default_extraction': 'INTEGER NOT NULL DEFAULT 0',
+        'input_price': 'REAL NOT NULL DEFAULT 0',
+        'output_price': 'REAL NOT NULL DEFAULT 0',
+        'cache_read_price': 'REAL NOT NULL DEFAULT 0',
+        'cache_write_price': 'REAL NOT NULL DEFAULT 0',
+      },
+      'historical_events': {'fingerprint': 'TEXT'},
+    };
+    for (final entry in additions.entries) {
+      final info = await db.rawQuery('PRAGMA table_info(${entry.key})');
+      final existing = {for (final row in info) row['name'] as String?};
+      for (final column in entry.value.entries) {
+        if (existing.contains(column.key)) continue;
+        try {
+          await db.execute(
+            'ALTER TABLE ${entry.key} ADD COLUMN ${column.key} ${column.value}',
+          );
+        } catch (_) {
+          // Keep opening old snapshots even if a platform DDL quirk occurs.
+        }
+      }
+    }
+    try {
+      await db.execute(
+        'CREATE UNIQUE INDEX IF NOT EXISTS idx_events_fingerprint '
+        'ON historical_events(fingerprint) WHERE fingerprint IS NOT NULL',
+      );
+    } catch (_) {
+      // Existing duplicate fingerprints must not prevent startup.
+    }
   }
 
   static Future<bool> _ensureFts(Database db) async {

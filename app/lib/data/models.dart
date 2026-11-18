@@ -478,6 +478,12 @@ class TaskInfo {
     this.bookId,
     this.chapterId,
     this.result = const {},
+    this.inputTokens = 0,
+    this.outputTokens = 0,
+    this.cacheReadTokens = 0,
+    this.cacheWriteTokens = 0,
+    this.cost = 0,
+    this.requests = 0,
   });
 
   final String id;
@@ -492,8 +498,15 @@ class TaskInfo {
   final String? bookId;
   final String? chapterId;
   final Map<String, dynamic> result;
+  final int inputTokens;
+  final int outputTokens;
+  final int cacheReadTokens;
+  final int cacheWriteTokens;
+  final double cost;
+  final int requests;
 
-  bool get isActive => status == 'queued' || status == 'running';
+  bool get isActive =>
+      status == 'queued' || status == 'running' || status == 'paused';
   bool get isFinished =>
       ['completed', 'partial', 'failed', 'cancelled'].contains(status);
 
@@ -510,6 +523,12 @@ class TaskInfo {
     bookId: _str(json['book_id']),
     chapterId: _str(json['chapter_id']),
     result: (json['result'] as Map?)?.cast<String, dynamic>() ?? const {},
+    inputTokens: _int(json['input_tokens']),
+    outputTokens: _int(json['output_tokens']),
+    cacheReadTokens: _int(json['cache_read_tokens']),
+    cacheWriteTokens: _int(json['cache_write_tokens']),
+    cost: _double(json['cost']),
+    requests: _int(json['requests']),
   );
 }
 

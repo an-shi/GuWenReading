@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:convert';
+import 'dart:math' as math;
 
 import 'package:collection/collection.dart';
 import 'package:crypto/crypto.dart';
@@ -7,6 +8,7 @@ import 'package:sqflite/sqflite.dart';
 
 import '../../data/models.dart';
 import 'ai_service.dart';
+import 'local_models.dart';
 import 'local_store.dart';
 
 class TranslationService {
@@ -20,10 +22,22 @@ class TranslationService {
   final AiSettingsService aiSettings;
   final AiJsonClient client;
 
+  static const _cachePolicyVersion = 2;
+
   Future<TaskInfo> startChapterTranslation(
     String chapterId, {
     bool retranslate = false,
   }) async {
+    final active = await store.activeTask(
+      type: 'translation',
+      chapterId: chapterId,
+    );
+    if (active != null && active.status != 'paused') return active;
+    if (active != null) {
+      await store.updateTask(active.id, status: 'running', error: null);
+      unawaited(_run(active.id, chapterId, retranslate));
+      return (await store.getTask(active.id)) ?? active;
+    }
     final content = await store.chapterContent(chapterId);
     if (content == null) throw TranslationException('章节不存在');
     final task = await store.createTask(
@@ -51,6 +65,7 @@ class TranslationService {
       await store.updateTask(taskId, status: 'failed', error: '尚未配置默认翻译模型');
       return;
     }
+    final promptVersion = await aiSettings.activePromptVersion('translation');
     final allSentences = content.paragraphs
         .expand((paragraph) => paragraph.sentences)
         .toList();
@@ -70,26 +85,86 @@ class TranslationService {
       );
       return;
     }
-    await store.updateTask(taskId, status: 'running', total: targets.length);
+    final total = targets.length;
+    await store.updateTask(taskId, status: 'running', total: total);
     var completed = 0;
     var failed = 0;
     var cached = 0;
+
+    final pending = <Sentence>[];
+    final cacheKeys = <String, String>{};
+    for (final sentence in targets) {
+      final cacheKey = _sentenceCacheKey(
+        sentence,
+        content,
+        resolved.label,
+        promptVersion,
+      );
+      cacheKeys[sentence.id] = cacheKey;
+      final cachedText = await store.translationSentenceCache(cacheKey);
+      if (cachedText == null || cachedText.trim().isEmpty) {
+        pending.add(sentence);
+        continue;
+      }
+      await _saveTranslation(
+        content: content,
+        sentence: sentence,
+        text: cachedText,
+        modelLabel: resolved.label,
+        promptVersion: promptVersion,
+      );
+      cached += 1;
+      completed += 1;
+    }
+    if (pending.isEmpty) {
+      await store.refreshBookStats(content.bookId);
+      await store.updateTask(
+        taskId,
+        status: 'completed',
+        progress: 100,
+        completed: completed,
+        total: total,
+        result: {
+          'completed': completed,
+          'failed': 0,
+          'cached': cached,
+          'model': resolved.label,
+        },
+      );
+      return;
+    }
+    await store.updateTask(
+      taskId,
+      progress: completed / total * 100,
+      completed: completed,
+      failedCount: failed,
+    );
+
+    final batchChars = _batchCharBudget(resolved.model);
     var batchStart = 0;
-    while (batchStart < targets.length) {
+    while (batchStart < pending.length) {
       final task = await store.getTask(taskId);
-      if (task == null || task.status == 'cancelled') return;
+      if (task == null ||
+          task.status == 'cancelled' ||
+          task.status == 'paused') {
+        return;
+      }
       final batch = <Sentence>[];
       var chars = 0;
-      while (batchStart < targets.length && (chars < 2200 || batch.isEmpty)) {
-        final sentence = targets[batchStart];
+      while (batchStart < pending.length &&
+          (chars < batchChars || batch.isEmpty)) {
+        final sentence = pending[batchStart];
         batch.add(sentence);
         chars += sentence.originalText.length;
         batchStart += 1;
       }
       try {
+        final localById = <int, Sentence>{
+          for (var i = 0; i < batch.length; i++) i + 1: batch[i],
+        };
         final items = [
-          for (final sentence in batch)
-            {'id': sentence.id, 'text': sentence.originalText},
+          for (final entry in localById.entries)
+            {'id': entry.key, 'text': entry.value.originalText},
         ];
         final prompt = await aiSettings.render('translation', {
           'book_title': content.bookTitle,
@@ -100,7 +175,11 @@ class TranslationService {
           'items_json': jsonEncode(items),
         });
         final cacheKey = sha256
-            .convert(utf8.encode('${resolved.label}|$prompt'))
+            .convert(
+              utf8.encode(
+                '${resolved.label}|v$promptVersion|p$_cachePolicyVersion|$prompt',
+              ),
+            )
             .toString();
         final cachedRows = await store.db.query(
           'translation_cache',
@@ -109,13 +188,19 @@ class TranslationService {
           limit: 1,
         );
         Map<String, dynamic> data;
+        var fromBatchCache = false;
         if (cachedRows.isNotEmpty) {
           data = jsonDecode(
             cachedRows.first['text'] as String,
           ) as Map<String, dynamic>;
-          cached += batch.length;
+          fromBatchCache = true;
         } else {
-          data = await client.chatJson(purpose: 'translation', prompt: prompt);
+          data = await client.chatJson(
+            purpose: 'translation',
+            prompt: prompt,
+            taskId: taskId,
+            taskType: 'translation',
+          );
           await store.db.insert('translation_cache', {
             'cache_key': cacheKey,
             'text': jsonEncode(data),
@@ -125,14 +210,19 @@ class TranslationService {
         final translations = jsonList(data['translations']).isNotEmpty
             ? jsonList(data['translations'])
             : jsonList(data['items']);
-        final byId = {
-          for (final item in translations)
-            if (jsonString(item['id']) != null)
-              jsonString(item['id'])!: jsonString(item['text']) ?? '',
-        };
-        for (final sentence in batch) {
-          final text = byId[sentence.id];
-          if (text == null || text.trim().isEmpty) {
+        final byId = <int, String>{};
+        for (final item in translations) {
+          final rawId = item['id'] ?? item['i'];
+          final index = rawId is int ? rawId : int.tryParse('$rawId'.trim());
+          final text = jsonString(item['text'] ?? item['t']);
+          if (index == null || text == null || text.trim().isEmpty) continue;
+          byId[index] = text.trim();
+        }
+        if (fromBatchCache) cached += byId.length;
+        for (final entry in localById.entries) {
+          final sentence = entry.value;
+          final text = byId[entry.key];
+          if (text == null) {
             failed += 1;
             await store.setSentenceState(
               sentence.id,
@@ -141,29 +231,24 @@ class TranslationService {
             );
             continue;
           }
-          await store.upsertTranslation(
-            sentenceId: sentence.id,
-            text: text.trim(),
-            origin: 'ai',
-            modelName: resolved.label,
-            promptVersion: 1,
+          await _saveTranslation(
+            content: content,
+            sentence: sentence,
+            text: text,
+            modelLabel: resolved.label,
+            promptVersion: promptVersion,
           );
-          final current = await store.db.query(
-            'translations',
-            where: 'sentence_id = ?',
-            whereArgs: [sentence.id],
-            limit: 1,
-          );
-          final indexedText = current.isEmpty
-              ? text.trim()
-              : current.first['text'] as String? ?? text.trim();
-          await store.indexSentence(
-            sentenceId: sentence.id,
-            bookId: content.bookId,
-            chapterId: chapterId,
-            text: indexedText,
-            docType: 'translation',
-          );
+          final sentenceCacheKey = cacheKeys[sentence.id];
+          if (sentenceCacheKey != null) {
+            await _putSentenceCache(
+              sentence: sentence,
+              content: content,
+              cacheKey: sentenceCacheKey,
+              modelLabel: resolved.label,
+              promptVersion: promptVersion,
+              text: text,
+            );
+          }
           completed += 1;
         }
       } catch (error) {
@@ -174,10 +259,11 @@ class TranslationService {
       }
       await store.updateTask(
         taskId,
-        progress: (completed + failed) / targets.length * 100,
+        progress: (completed + failed) / total * 100,
         completed: completed,
         failedCount: failed,
       );
+      if (await _pauseIfBudgetExceeded(taskId)) return;
     }
     await store.refreshBookStats(content.bookId);
     await store.updateTask(
@@ -197,6 +283,105 @@ class TranslationService {
     );
   }
 
+  Future<void> _saveTranslation({
+    required ChapterContent content,
+    required Sentence sentence,
+    required String text,
+    required String modelLabel,
+    required int promptVersion,
+  }) async {
+    await store.upsertTranslation(
+      sentenceId: sentence.id,
+      text: text.trim(),
+      origin: 'ai',
+      modelName: modelLabel,
+      promptVersion: promptVersion,
+    );
+    final current = await store.db.query(
+      'translations',
+      where: 'sentence_id = ?',
+      whereArgs: [sentence.id],
+      limit: 1,
+    );
+    final indexedText = current.isEmpty
+        ? text.trim()
+        : current.first['text'] as String? ?? text.trim();
+    await store.indexSentence(
+      sentenceId: sentence.id,
+      bookId: content.bookId,
+      chapterId: content.chapterId,
+      text: indexedText,
+      docType: 'translation',
+    );
+  }
+
+  Future<void> _putSentenceCache({
+    required Sentence sentence,
+    required ChapterContent content,
+    required String cacheKey,
+    required String modelLabel,
+    required int promptVersion,
+    required String text,
+  }) async {
+    await store.putTranslationSentenceCache(
+      cacheKey: cacheKey,
+      sourceHash: sha256.convert(utf8.encode(sentence.originalText)).toString(),
+      contextHash: _contextHash(content, sentence),
+      modelLabel: modelLabel,
+      promptVersion: promptVersion,
+      translatedText: text.trim(),
+    );
+  }
+
+  String _sentenceCacheKey(
+    Sentence sentence,
+    ChapterContent content,
+    String modelLabel,
+    int promptVersion,
+  ) {
+    final sourceHash = sha256
+        .convert(utf8.encode(sentence.originalText))
+        .toString();
+    return sha256
+        .convert(
+          utf8.encode(
+            '$sourceHash|${_contextHash(content, sentence)}|$modelLabel|'
+            'v$promptVersion|p$_cachePolicyVersion',
+          ),
+        )
+        .toString();
+  }
+
+  String _contextHash(ChapterContent content, Sentence sentence) {
+    final before = _context(content, sentence, before: true);
+    final after = _context(content, sentence, before: false);
+    return sha256.convert(utf8.encode('$before|$after')).toString();
+  }
+
+  Future<bool> _pauseIfBudgetExceeded(String taskId) async {
+    final budget = await readAiTaskBudget();
+    if (budget <= 0) return false;
+    final task = await store.getTask(taskId);
+    if (task == null || task.cost < budget) return false;
+    await store.updateTask(
+      taskId,
+      status: 'paused',
+      error:
+          '已达到单次任务费用上限（${task.cost.toStringAsFixed(4)} / '
+          '${budget.toStringAsFixed(4)}）。请提高预算后重新开始任务。',
+    );
+    return true;
+  }
+
+  int _batchCharBudget(AiModelRecord model) {
+    final outputBound = math.max(400, (model.maxOutputTokens * 0.75).round());
+    final inputBound = math.max(
+      600,
+      model.contextWindow - model.maxOutputTokens - 1200,
+    );
+    return math.max(400, math.min(6000, math.min(outputBound, inputBound)));
+  }
+
   String _context(
     ChapterContent content,
     Sentence sentence, {
@@ -209,25 +394,34 @@ class TranslationService {
         (item) => item.id == sentence.id,
       );
       if (index < 0) continue;
-      if (before) {
-        final parts = <String>[];
-        if (index > 1) parts.add(paragraph.sentences[index - 2].originalText);
-        if (index > 0) parts.add(paragraph.sentences[index - 1].originalText);
-        if (i > 0) parts.add(paragraphs[i - 1].originalText);
-        return parts.join();
-      }
       final parts = <String>[];
-      if (index + 1 < paragraph.sentences.length) {
-        parts.add(paragraph.sentences[index + 1].originalText);
+      final needsMore =
+          sentence.originalText.length >= 80 ||
+          RegExp(r'^[其此是彼故然則而曰蓋夫]').hasMatch(sentence.originalText);
+      if (before) {
+        if (index > 0) parts.add(paragraph.sentences[index - 1].originalText);
+        if (needsMore && i > 0) {
+          parts.add(_truncate(paragraphs[i - 1].originalText, 360));
+        }
+      } else {
+        if (index + 1 < paragraph.sentences.length) {
+          parts.add(paragraph.sentences[index + 1].originalText);
+        }
+        if (needsMore &&
+            i + 1 < paragraphs.length &&
+            paragraphs[i + 1].sentences.isNotEmpty) {
+          parts.add(
+            _truncate(paragraphs[i + 1].sentences.first.originalText, 360),
+          );
+        }
       }
-      if (index + 2 < paragraph.sentences.length) {
-        parts.add(paragraph.sentences[index + 2].originalText);
-      }
-      if (i + 1 < paragraphs.length) parts.add(paragraphs[i + 1].originalText);
-      return parts.join();
+      return _truncate(parts.join(), 700);
     }
     return '';
   }
+
+  String _truncate(String text, int maxLength) =>
+      text.length <= maxLength ? text : text.substring(0, maxLength);
 
   Future<void> saveManual(String sentenceId, String text) async {
     await store.upsertTranslation(
@@ -255,7 +449,10 @@ class TranslationService {
     }
   }
 
-  Future<void> retranslateSentence(String sentenceId) async {
+  Future<void> retranslateSentence(
+    String sentenceId, {
+    bool useCache = true,
+  }) async {
     final rows = await store.db.rawQuery(
       '''
       SELECT s.*, c.title AS chapter_title, b.title AS book_title, b.author AS book_author
@@ -270,24 +467,58 @@ class TranslationService {
     final row = rows.first;
     final resolved = await aiSettings.resolve(purpose: 'translation');
     if (resolved == null) throw TranslationException('尚未配置默认翻译模型');
+    final promptVersion = await aiSettings.activePromptVersion('translation');
+    final content = await store.chapterContent(row['chapter_id'] as String);
+    final sentence = content?.paragraphs
+        .expand((paragraph) => paragraph.sentences)
+        .where((item) => item.id == sentenceId)
+        .firstOrNull;
+    if (content != null && sentence != null && useCache) {
+      final cacheKey = _sentenceCacheKey(
+        sentence,
+        content,
+        resolved.label,
+        promptVersion,
+      );
+      final cachedText = await store.translationSentenceCache(cacheKey);
+      if (cachedText != null && cachedText.trim().isNotEmpty) {
+        await _saveTranslation(
+          content: content,
+          sentence: sentence,
+          text: cachedText,
+          modelLabel: resolved.label,
+          promptVersion: promptVersion,
+        );
+        await store.refreshBookStats(content.bookId);
+        return;
+      }
+    }
     final prompt = await aiSettings.render('translation', {
       'book_title': row['book_title'] ?? '',
       'author': row['book_author'] ?? '未详',
       'chapter_title': row['chapter_title'] ?? '',
-      'context_before': '',
-      'context_after': '',
+      'context_before': content != null && sentence != null
+          ? _context(content, sentence, before: true)
+          : '',
+      'context_after': content != null && sentence != null
+          ? _context(content, sentence, before: false)
+          : '',
       'items_json': jsonEncode([
-        {'id': sentenceId, 'text': row['original_text'] ?? ''},
+        {'id': 1, 'text': row['original_text'] ?? ''},
       ]),
     });
-    final data = await client.chatJson(purpose: 'translation', prompt: prompt);
+    final data = await client.chatJson(
+      purpose: 'translation',
+      prompt: prompt,
+      taskType: 'translation',
+    );
     final translations = jsonList(data['translations']).isNotEmpty
         ? jsonList(data['translations'])
         : jsonList(data['items']);
     final match = translations
-        .where((item) => jsonString(item['id']) == sentenceId)
+        .where((item) => '${item['id'] ?? item['i']}'.trim() == '1')
         .firstOrNull;
-    final text = jsonString(match?['text']);
+    final text = jsonString(match?['text'] ?? match?['t']);
     if (text == null || text.trim().isEmpty) {
       throw TranslationException('AI 未返回该句译文');
     }
@@ -296,7 +527,7 @@ class TranslationService {
       text: text.trim(),
       origin: 'ai',
       modelName: resolved.label,
-      promptVersion: 1,
+      promptVersion: promptVersion,
     );
     final current = await store.db.query(
       'translations',
@@ -313,6 +544,21 @@ class TranslationService {
           : current.first['text'] as String? ?? text.trim(),
       docType: 'translation',
     );
+    if (content != null && sentence != null) {
+      await _putSentenceCache(
+        sentence: sentence,
+        content: content,
+        cacheKey: _sentenceCacheKey(
+          sentence,
+          content,
+          resolved.label,
+          promptVersion,
+        ),
+        modelLabel: resolved.label,
+        promptVersion: promptVersion,
+        text: text,
+      );
+    }
     await store.refreshBookStats(row['book_id'] as String);
   }
 

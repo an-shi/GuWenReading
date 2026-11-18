@@ -206,6 +206,9 @@ class BackupService {
       }
       await _restoreDirectory(archive, 'books', paths.booksDir);
       await _restoreDirectory(archive, 'covers', paths.coversDir);
+      await store.db.delete('translation_sentence_cache');
+      await store.db.delete('knowledge_chunk_cache');
+      await store.db.delete('knowledge_extraction_state');
       await store.resetSearchIndex();
     } finally {
       if (await tempDir.exists()) await tempDir.delete(recursive: true);

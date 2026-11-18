@@ -164,6 +164,16 @@ class LocalStore {
         where: 'book_id = ? OR chapter_id IN (SELECT id FROM chapters WHERE book_id = ?)',
         whereArgs: [bookId, bookId],
       );
+      await txn.delete(
+        'knowledge_chunk_cache',
+        where: 'chapter_id IN (SELECT id FROM chapters WHERE book_id = ?)',
+        whereArgs: [bookId],
+      );
+      await txn.delete(
+        'knowledge_extraction_state',
+        where: 'chapter_id IN (SELECT id FROM chapters WHERE book_id = ?)',
+        whereArgs: [bookId],
+      );
       if (database.ftsAvailable) {
         await txn.delete(
           'search_fts',
@@ -975,10 +985,271 @@ class LocalStore {
     bookId: row['book_id'] as String?,
     chapterId: row['chapter_id'] as String?,
     result: _decodeMap(row['result']),
+    inputTokens: row['input_tokens'] as int? ?? 0,
+    outputTokens: row['output_tokens'] as int? ?? 0,
+    cacheReadTokens: row['cache_read_tokens'] as int? ?? 0,
+    cacheWriteTokens: row['cache_write_tokens'] as int? ?? 0,
+    cost: (row['cost'] as num? ?? 0).toDouble(),
+    requests: row['requests'] as int? ?? 0,
   );
 
   Future<void> cancelTask(String id) async {
     await updateTask(id, status: 'cancelled');
+  }
+
+  Future<TaskInfo?> activeTask({
+    required String type,
+    String? chapterId,
+  }) async {
+    final rows = await db.query(
+      'tasks',
+      where: chapterId == null
+          ? "type = ? AND status IN ('queued','running','paused')"
+          : "type = ? AND chapter_id = ? AND status IN ('queued','running','paused')",
+      whereArgs: chapterId == null ? [type] : [type, chapterId],
+      orderBy: 'created_at DESC',
+      limit: 1,
+    );
+    return rows.isEmpty ? null : _taskFromRow(rows.first);
+  }
+
+  Future<void> recordAiUsage({
+    String? taskId,
+    required String taskType,
+    String? providerId,
+    String? providerName,
+    String? modelId,
+    String? modelName,
+    required int inputTokens,
+    required int outputTokens,
+    int cacheReadTokens = 0,
+    int cacheWriteTokens = 0,
+    required double cost,
+    required int durationMs,
+    required String status,
+    String? error,
+    int retryCount = 0,
+    bool isEstimated = false,
+  }) async {
+    final now = nowIso();
+    final totalTokens =
+        inputTokens + outputTokens + cacheReadTokens + cacheWriteTokens;
+    try {
+      await db.insert('ai_usage', {
+        'id': newLocalId('usage'),
+        'task_id': taskId,
+        'task_type': taskType,
+        'provider_id': providerId,
+        'provider_name': providerName,
+        'model_id': modelId,
+        'model_name': modelName,
+        'input_tokens': inputTokens,
+        'output_tokens': outputTokens,
+        'cache_read_tokens': cacheReadTokens,
+        'cache_write_tokens': cacheWriteTokens,
+        'total_tokens': totalTokens,
+        'cost': cost,
+        'duration_ms': durationMs,
+        'status': status,
+        'retry_count': retryCount,
+        'is_estimated': isEstimated ? 1 : 0,
+        'error': error,
+        'created_at': now,
+      });
+      if (taskId != null) {
+        await db.rawUpdate(
+          '''
+          UPDATE tasks SET
+            input_tokens = input_tokens + ?,
+            output_tokens = output_tokens + ?,
+            cache_read_tokens = cache_read_tokens + ?,
+            cache_write_tokens = cache_write_tokens + ?,
+            cost = cost + ?,
+            requests = requests + 1,
+            updated_at = ?
+          WHERE id = ?
+          ''',
+          [
+            inputTokens,
+            outputTokens,
+            cacheReadTokens,
+            cacheWriteTokens,
+            cost,
+            now,
+            taskId,
+          ],
+        );
+      }
+    } catch (_) {
+      // Metering must never make a successful AI call fail.
+    }
+  }
+
+  Future<AiUsageSummary> aiUsageSummary() async {
+    final totals = await db.rawQuery('''
+      SELECT COUNT(*) AS requests,
+        COALESCE(SUM(input_tokens), 0) AS input_tokens,
+        COALESCE(SUM(output_tokens), 0) AS output_tokens,
+        COALESCE(SUM(cache_read_tokens), 0) AS cache_read_tokens,
+        COALESCE(SUM(cache_write_tokens), 0) AS cache_write_tokens,
+        COALESCE(SUM(cost), 0) AS cost
+      FROM ai_usage
+      ''');
+    final typeRows = await db.rawQuery('''
+      SELECT task_type AS label, COUNT(*) AS requests,
+        COALESCE(SUM(input_tokens), 0) AS input_tokens,
+        COALESCE(SUM(output_tokens), 0) AS output_tokens,
+        COALESCE(SUM(cache_read_tokens), 0) AS cache_read_tokens,
+        COALESCE(SUM(cache_write_tokens), 0) AS cache_write_tokens,
+        COALESCE(SUM(cost), 0) AS cost
+      FROM ai_usage GROUP BY task_type ORDER BY cost DESC
+      ''');
+    final modelRows = await db.rawQuery('''
+      SELECT COALESCE(model_name, '未记录模型') AS label, COUNT(*) AS requests,
+        COALESCE(SUM(input_tokens), 0) AS input_tokens,
+        COALESCE(SUM(output_tokens), 0) AS output_tokens,
+        COALESCE(SUM(cache_read_tokens), 0) AS cache_read_tokens,
+        COALESCE(SUM(cache_write_tokens), 0) AS cache_write_tokens,
+        COALESCE(SUM(cost), 0) AS cost
+      FROM ai_usage GROUP BY model_name ORDER BY cost DESC
+      ''');
+    final total = totals.first;
+    return AiUsageSummary(
+      requests: total['requests'] as int? ?? 0,
+      inputTokens: total['input_tokens'] as int? ?? 0,
+      outputTokens: total['output_tokens'] as int? ?? 0,
+      cacheReadTokens: total['cache_read_tokens'] as int? ?? 0,
+      cacheWriteTokens: total['cache_write_tokens'] as int? ?? 0,
+      cost: (total['cost'] as num? ?? 0).toDouble(),
+      byType: typeRows.map(_usageGroupFromRow).toList(),
+      byModel: modelRows.map(_usageGroupFromRow).toList(),
+    );
+  }
+
+  AiUsageGroup _usageGroupFromRow(Map<String, Object?> row) => AiUsageGroup(
+    label: row['label'] as String? ?? '其他',
+    requests: row['requests'] as int? ?? 0,
+    inputTokens: row['input_tokens'] as int? ?? 0,
+    outputTokens: row['output_tokens'] as int? ?? 0,
+    cacheReadTokens: row['cache_read_tokens'] as int? ?? 0,
+    cacheWriteTokens: row['cache_write_tokens'] as int? ?? 0,
+    cost: (row['cost'] as num? ?? 0).toDouble(),
+  );
+
+  Future<String?> translationSentenceCache(String cacheKey) async {
+    final rows = await db.query(
+      'translation_sentence_cache',
+      where: 'cache_key = ?',
+      whereArgs: [cacheKey],
+      limit: 1,
+    );
+    if (rows.isEmpty) return null;
+    await db.update(
+      'translation_sentence_cache',
+      {'last_used_at': nowIso()},
+      where: 'cache_key = ?',
+      whereArgs: [cacheKey],
+    );
+    return rows.first['translated_text'] as String?;
+  }
+
+  Future<void> putTranslationSentenceCache({
+    required String cacheKey,
+    required String sourceHash,
+    required String contextHash,
+    required String modelLabel,
+    required int promptVersion,
+    required String translatedText,
+  }) async {
+    final now = nowIso();
+    await db.insert('translation_sentence_cache', {
+      'cache_key': cacheKey,
+      'source_hash': sourceHash,
+      'context_hash': contextHash,
+      'model_label': modelLabel,
+      'prompt_version': promptVersion,
+      'translated_text': translatedText,
+      'created_at': now,
+      'last_used_at': now,
+    }, conflictAlgorithm: ConflictAlgorithm.replace);
+  }
+
+  Future<String?> knowledgeChunkCache({
+    required String chapterId,
+    required int chunkIndex,
+    required String contentHash,
+    required String modelLabel,
+    required int promptVersion,
+    required int schemaVersion,
+  }) async {
+    final rows = await db.query(
+      'knowledge_chunk_cache',
+      where: 'chapter_id = ? AND chunk_index = ? AND content_hash = ? AND model_label = ? AND prompt_version = ? AND schema_version = ?',
+      whereArgs: [
+        chapterId,
+        chunkIndex,
+        contentHash,
+        modelLabel,
+        promptVersion,
+        schemaVersion,
+      ],
+      limit: 1,
+    );
+    if (rows.isEmpty) return null;
+    return rows.first['result_json'] as String?;
+  }
+
+  Future<void> putKnowledgeChunkCache({
+    required String chapterId,
+    required int chunkIndex,
+    required String contentHash,
+    required String modelLabel,
+    required int promptVersion,
+    required int schemaVersion,
+    required String resultJson,
+  }) async {
+    await db.insert('knowledge_chunk_cache', {
+      'chapter_id': chapterId,
+      'chunk_index': chunkIndex,
+      'content_hash': contentHash,
+      'model_label': modelLabel,
+      'prompt_version': promptVersion,
+      'schema_version': schemaVersion,
+      'result_json': resultJson,
+      'status': 'completed',
+      'updated_at': nowIso(),
+    }, conflictAlgorithm: ConflictAlgorithm.replace);
+  }
+
+  Future<Map<String, Object?>?> knowledgeExtractionState(
+    String chapterId,
+  ) async {
+    final rows = await db.query(
+      'knowledge_extraction_state',
+      where: 'chapter_id = ?',
+      whereArgs: [chapterId],
+      limit: 1,
+    );
+    return rows.isEmpty ? null : rows.first;
+  }
+
+  Future<void> putKnowledgeExtractionState({
+    required String chapterId,
+    required String contentHash,
+    required String modelLabel,
+    required int promptVersion,
+    required int schemaVersion,
+    required String status,
+  }) async {
+    await db.insert('knowledge_extraction_state', {
+      'chapter_id': chapterId,
+      'content_hash': contentHash,
+      'model_label': modelLabel,
+      'prompt_version': promptVersion,
+      'schema_version': schemaVersion,
+      'status': status,
+      'updated_at': nowIso(),
+    }, conflictAlgorithm: ConflictAlgorithm.replace);
   }
 
   // ---------------------------------------------------------------- AI config
@@ -1029,6 +1300,9 @@ class LocalStore {
       if (model.isDefaultChat) {
         await txn.update('ai_models', {'is_default_chat': 0});
       }
+      if (model.isDefaultExtraction) {
+        await txn.update('ai_models', {'is_default_extraction': 0});
+      }
       await txn.insert('ai_models', {
         'id': model.id,
         'provider_id': model.providerId,
@@ -1041,6 +1315,11 @@ class LocalStore {
         'supports_json': model.supportsJson ? 1 : 0,
         'is_default_translation': model.isDefaultTranslation ? 1 : 0,
         'is_default_chat': model.isDefaultChat ? 1 : 0,
+        'is_default_extraction': model.isDefaultExtraction ? 1 : 0,
+        'input_price': model.inputPrice,
+        'output_price': model.outputPrice,
+        'cache_read_price': model.cacheReadPrice,
+        'cache_write_price': model.cacheWritePrice,
         'enabled': model.enabled ? 1 : 0,
         'created_at': now,
         'updated_at': now,
@@ -1055,6 +1334,8 @@ class LocalStore {
   Future<AiModelRecord?> defaultModel(String capability) async {
     final column = capability == 'translation'
         ? 'is_default_translation'
+        : capability == 'extraction'
+        ? 'is_default_extraction'
         : 'is_default_chat';
     final rows = await db.query(
       'ai_models',

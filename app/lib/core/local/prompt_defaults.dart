@@ -29,6 +29,33 @@ class DefaultPrompt {
 
 const defaultPrompts = <DefaultPrompt>[
   DefaultPrompt(
+    key: 'knowledge_extract',
+    name: '联合知识抽取',
+    description: '一次抽取实体、人物关系和历史事件，使用短索引关联原文证据。',
+    variables: ['book_title', 'chapter_title', 'items_json'],
+    template: '''你是严谨的中国古代史知识抽取助手。请从下面按编号排列的古文句子中同时抽取实体、关系和历史事件。
+
+实体类型：person（人物）、place（地点）、office（职官）、institution（机构）、dynasty（朝代/政权）、work（典籍）、other（其他）。
+关系类型：君臣关系、亲属关系、师生关系、朋友关系、敌对关系、任职关系、隶属关系、政治关系、军事关系、其他。
+事件类型：war（战争）、coup（政变）、accession（登基/即位）、appointment（任免）、migration（迁徙）、diplomacy（外交）、institution_change（制度变更）、other（其他）。
+
+书籍：{{book_title}}
+章节：{{chapter_title}}
+原文句子（i 为句子编号）：
+{{items_json}}
+
+只输出紧凑 JSON，不要 Markdown 围栏，不要输出人物介绍、原文摘录或解释：
+{"entities":[{"id":1,"name":"标准名称","type":"person","aliases":[],"dynasty":null,"evidence":[3]}],"relations":[{"from":1,"to":2,"type":"君臣关系","evidence":[3]}],"events":[{"name":"事件名称","type":"war","time":null,"year":null,"precision":"unknown","participants":[1,2],"evidence":[3]}]}
+
+要求：
+1. id 从 1 开始，只表示本批实体；relations 的 from/to、events 的 participants 只能引用本批实体 id。
+2. evidence 只能使用本批真实句子编号 i，原文证据由本地程序根据编号读取；实体、关系、事件都应尽量给出 evidence。
+3. 关系必须有至少一条 evidence；事件必须有至少一条 evidence；没有证据的关系或事件不要输出。
+4. 不确定的时间写 null，无法换算公元年份时保留 time 原文；不要编造时间、人物或出处。
+5. 同名人物优先复用本批已给出的标准名称；没有依据的推断不要写成确定事实。
+6. 省略 null 和空数组字段，避免重复原文和冗长描述。''',
+  ),
+  DefaultPrompt(
     key: 'translation',
     name: '文言文翻译（均衡）',
     description: '逐句翻译为现代汉语，保留歧义与原文信息。',

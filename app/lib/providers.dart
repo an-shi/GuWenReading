@@ -114,6 +114,10 @@ final tasksProvider = AsyncNotifierProvider<TasksController, List<TaskInfo>>(
   TasksController.new,
 );
 
+final aiUsageSummaryProvider = FutureProvider<AiUsageSummary>((ref) {
+  return ref.watch(localStoreProvider).aiUsageSummary();
+});
+
 class TasksController extends AsyncNotifier<List<TaskInfo>> {
   @override
   Future<List<TaskInfo>> build() async {

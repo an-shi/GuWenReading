@@ -1,8 +1,10 @@
 import 'dart:convert';
+import 'dart:math' as math;
 
 import 'package:collection/collection.dart';
 import 'package:dio/dio.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
 import 'local_models.dart';
 import 'local_store.dart';
@@ -38,6 +40,54 @@ class RemoteAiModel {
   final int? maxOutputTokens;
   final bool supportsVision;
   final String? description;
+}
+
+/// Conservative token estimator used only when a provider does not return
+/// usage. CJK characters count as one token; other text is approximated at
+/// four characters per token.
+int estimateTokens(String text) {
+  if (text.isEmpty) return 0;
+  var cjk = 0;
+  var other = 0;
+  for (final rune in text.runes) {
+    if (_isCjkRune(rune)) {
+      cjk += 1;
+    } else {
+      other += 1;
+    }
+  }
+  return math.max(1, cjk + (other / 4).ceil());
+}
+
+/// Reads the optional per-task cost cap from shared settings.
+/// Zero means unlimited.
+Future<double> readAiTaskBudget() async {
+  try {
+    final prefs = await SharedPreferences.getInstance();
+    return prefs.getDouble('ai_task_budget') ?? 0;
+  } catch (_) {
+    return 0;
+  }
+}
+
+bool _isCjkRune(int rune) =>
+    (rune >= 0x3400 && rune <= 0x9FFF) ||
+    (rune >= 0xF900 && rune <= 0xFAFF) ||
+    (rune >= 0x20000 && rune <= 0x2FA1F) ||
+    (rune >= 0x3000 && rune <= 0x303F);
+
+class _ProviderUsage {
+  const _ProviderUsage({
+    required this.inputTokens,
+    required this.outputTokens,
+    required this.cacheReadTokens,
+    required this.cacheWriteTokens,
+  });
+
+  final int inputTokens;
+  final int outputTokens;
+  final int cacheReadTokens;
+  final int cacheWriteTokens;
 }
 
 class AiSettingsService {
@@ -93,7 +143,7 @@ class AiSettingsService {
     final rows = await store.listProviders();
     final result = <AiProviderRecord>[];
     for (final provider in rows) {
-      final key = await _storage.read(key: _keyName(provider.id)) ?? '';
+      final key = await _readKey(provider.id);
       result.add(
         AiProviderRecord(
           id: provider.id,
@@ -112,18 +162,40 @@ class AiSettingsService {
   Future<void> saveProvider(AiProviderRecord provider) async {
     await store.upsertProvider(provider);
     if (provider.apiKey.trim().isEmpty) {
-      await _storage.delete(key: _keyName(provider.id));
+      await _deleteKey(provider.id);
     } else {
-      await _storage.write(
-        key: _keyName(provider.id),
-        value: provider.apiKey.trim(),
-      );
+      await _writeKey(provider.id, provider.apiKey.trim());
     }
   }
 
   Future<void> deleteProvider(String id) async {
     await store.deleteProvider(id);
-    await _storage.delete(key: _keyName(id));
+    await _deleteKey(id);
+  }
+
+  Future<String> _readKey(String providerId) async {
+    try {
+      return await _storage.read(key: _keyName(providerId)) ?? '';
+    } catch (_) {
+      // Secure storage is unavailable in some headless/test environments.
+      return '';
+    }
+  }
+
+  Future<void> _writeKey(String providerId, String value) async {
+    try {
+      await _storage.write(key: _keyName(providerId), value: value);
+    } catch (_) {
+      // Keep the local provider configuration usable without secure storage.
+    }
+  }
+
+  Future<void> _deleteKey(String providerId) async {
+    try {
+      await _storage.delete(key: _keyName(providerId));
+    } catch (_) {
+      // Ignore unavailable secure storage.
+    }
   }
 
   Future<void> saveModel(AiModelRecord model) => store.upsertModel(model);
@@ -514,11 +586,14 @@ class AiSettingsService {
   }
 
   Future<ResolvedAiModel?> resolve({required String purpose}) async {
-    final model = await store.defaultModel(purpose);
+    var model = await store.defaultModel(purpose);
+    if (model == null && purpose == 'extraction') {
+      model = await store.defaultModel('chat');
+    }
     if (model == null || !model.enabled) return null;
     final provider = await store.getProvider(model.providerId);
     if (provider == null || !provider.enabled) return null;
-    final key = await _storage.read(key: _keyName(provider.id)) ?? '';
+    final key = await _readKey(provider.id);
     return ResolvedAiModel(model: model, provider: provider, apiKey: key);
   }
 
@@ -538,6 +613,13 @@ class AiSettingsService {
     if (active != null) return active;
     final fallback = await store.promptVersion(key, 1);
     return fallback;
+  }
+
+  Future<int> activePromptVersion(String key) async {
+    final active = await store.activePrompt(key);
+    if (active != null) return active.version;
+    final fallback = await store.promptVersion(key, 1);
+    return fallback?.version ?? 1;
   }
 
   Future<String> render(String key, Map<String, Object?> variables) async {
@@ -713,9 +795,13 @@ class AiJsonClient {
     required String prompt,
     bool jsonMode = false,
     double temperature = 0.2,
+    String? taskId,
+    String taskType = 'other',
+    int retryCount = 0,
   }) async {
     final resolved = await settings.resolve(purpose: purpose);
     if (resolved == null) throw AiNotConfiguredException();
+    final stopwatch = Stopwatch()..start();
     final dio = Dio(
       BaseOptions(
         connectTimeout: const Duration(seconds: 15),
@@ -738,34 +824,190 @@ class AiJsonClient {
       jsonMode: jsonMode,
       temperature: temperature,
     );
+    dynamic responseData;
+    String text;
     try {
       final response = await dio.post<dynamic>(
         url,
         data: body,
         options: Options(headers: headers),
       );
-      final text = _extractText(resolved, response.data);
-      if (text.trim().isEmpty) throw AiRequestException('AI 服务返回了空响应');
-      return text;
+      responseData = response.data;
+      text = _extractText(resolved, responseData);
     } on DioException catch (error) {
+      stopwatch.stop();
+      final reported = _parseProviderUsage(responseData: error.response?.data);
+      await _recordUsage(
+        resolved: resolved,
+        taskId: taskId,
+        taskType: taskType,
+        prompt: prompt,
+        responseText: '',
+        reported: reported,
+        durationMs: stopwatch.elapsedMilliseconds,
+        status: 'failed',
+        error: _dioMessage(error),
+        retryCount: retryCount,
+      );
       throw AiRequestException(_dioMessage(error));
     } finally {
       dio.close();
     }
+    stopwatch.stop();
+    final reported = _parseProviderUsage(responseData: responseData);
+    final success = text.trim().isNotEmpty;
+    await _recordUsage(
+      resolved: resolved,
+      taskId: taskId,
+      taskType: taskType,
+      prompt: prompt,
+      responseText: text,
+      reported: reported,
+      durationMs: stopwatch.elapsedMilliseconds,
+      status: success ? 'success' : 'failed',
+      error: success ? null : 'AI 服务返回了空响应',
+      retryCount: retryCount,
+    );
+    if (!success) throw AiRequestException('AI 服务返回了空响应');
+    return text;
   }
 
   Future<Map<String, dynamic>> chatJson({
     required String purpose,
     required String prompt,
     double temperature = 0.2,
+    String? taskId,
+    String taskType = 'other',
+    int retryCount = 0,
   }) async {
     final text = await chat(
       purpose: purpose,
       prompt: prompt,
       jsonMode: true,
       temperature: temperature,
+      taskId: taskId,
+      taskType: taskType,
+      retryCount: retryCount,
     );
     return parseJsonObject(text);
+  }
+
+  _ProviderUsage? _parseProviderUsage({dynamic responseData}) {
+    if (responseData is! Map) return null;
+    final rawUsage = responseData['usage'];
+    if (rawUsage is! Map) {
+      final promptEval = responseData['prompt_eval_count'];
+      final evalCount = responseData['eval_count'];
+      if (promptEval is num || evalCount is num) {
+        return _ProviderUsage(
+          inputTokens: promptEval is num ? promptEval.toInt() : 0,
+          outputTokens: evalCount is num ? evalCount.toInt() : 0,
+          cacheReadTokens: 0,
+          cacheWriteTokens: 0,
+        );
+      }
+      return null;
+    }
+    int readInt(Object? value) {
+      if (value is num) return value.toInt();
+      if (value is String) return int.tryParse(value) ?? 0;
+      return 0;
+    }
+
+    final details = rawUsage['prompt_tokens_details'];
+    final detailMap = details is Map ? details : const {};
+    final cacheRead = readInt(
+      rawUsage['cache_read_input_tokens'] ??
+          rawUsage['cached_tokens'] ??
+          detailMap['cached_tokens'],
+    );
+    final cacheWrite = readInt(
+      rawUsage['cache_creation_input_tokens'] ?? rawUsage['cache_write_tokens'],
+    );
+    final rawPrompt = readInt(
+      rawUsage['prompt_tokens'] ?? rawUsage['input_tokens'],
+    );
+    final output = readInt(
+      rawUsage['completion_tokens'] ?? rawUsage['output_tokens'],
+    );
+    // OpenAI's prompt_tokens already includes cached input, while Anthropic's
+    // input_tokens excludes cache reads/writes.
+    final promptIncludesCached =
+        rawUsage.containsKey('prompt_tokens') &&
+        !rawUsage.containsKey('cache_read_input_tokens');
+    final input = promptIncludesCached && rawPrompt >= cacheRead
+        ? rawPrompt - cacheRead
+        : rawPrompt;
+    return _ProviderUsage(
+      inputTokens: input,
+      outputTokens: output,
+      cacheReadTokens: cacheRead,
+      cacheWriteTokens: cacheWrite,
+    );
+  }
+
+  Future<void> _recordUsage({
+    required ResolvedAiModel resolved,
+    required String? taskId,
+    required String taskType,
+    required String prompt,
+    required String responseText,
+    required _ProviderUsage? reported,
+    required int durationMs,
+    required String status,
+    required String? error,
+    required int retryCount,
+  }) async {
+    final estimated = reported == null;
+    final input = reported?.inputTokens ?? estimateTokens(prompt);
+    final output = reported?.outputTokens ?? estimateTokens(responseText);
+    final cacheRead = reported?.cacheReadTokens ?? 0;
+    final cacheWrite = reported?.cacheWriteTokens ?? 0;
+    final cost = _estimateCost(
+      resolved.model,
+      inputTokens: input,
+      outputTokens: output,
+      cacheReadTokens: cacheRead,
+      cacheWriteTokens: cacheWrite,
+    );
+    await settings.store.recordAiUsage(
+      taskId: taskId,
+      taskType: taskType,
+      providerId: resolved.provider.id,
+      providerName: resolved.provider.name,
+      modelId: resolved.model.id,
+      modelName: resolved.model.displayName,
+      inputTokens: input,
+      outputTokens: output,
+      cacheReadTokens: cacheRead,
+      cacheWriteTokens: cacheWrite,
+      cost: cost,
+      durationMs: durationMs,
+      status: status,
+      error: error,
+      retryCount: retryCount,
+      isEstimated: estimated,
+    );
+  }
+
+  double _estimateCost(
+    AiModelRecord model, {
+    required int inputTokens,
+    required int outputTokens,
+    required int cacheReadTokens,
+    required int cacheWriteTokens,
+  }) {
+    final cacheReadPrice = model.cacheReadPrice > 0
+        ? model.cacheReadPrice
+        : model.inputPrice;
+    final cacheWritePrice = model.cacheWritePrice > 0
+        ? model.cacheWritePrice
+        : model.inputPrice;
+    return (inputTokens * model.inputPrice +
+            outputTokens * model.outputPrice +
+            cacheReadTokens * cacheReadPrice +
+            cacheWriteTokens * cacheWritePrice) /
+        1000000;
   }
 
   String _endpoint(ResolvedAiModel resolved) {

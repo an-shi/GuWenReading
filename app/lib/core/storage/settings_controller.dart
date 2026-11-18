@@ -8,6 +8,7 @@ class AppSettings {
     this.lineHeight = 1.9,
     this.defaultReadingMode = 'alternating',
     this.autoTranslate = false,
+    this.aiTaskBudget = 0,
     this.loaded = false,
   });
 
@@ -16,6 +17,10 @@ class AppSettings {
   final double lineHeight;
   final String defaultReadingMode;
   final bool autoTranslate;
+
+  /// Maximum estimated cost for a single AI task. Zero means unlimited.
+  /// The unit follows the model price configuration.
+  final double aiTaskBudget;
   final bool loaded;
 
   AppSettings copyWith({
@@ -24,6 +29,7 @@ class AppSettings {
     double? lineHeight,
     String? defaultReadingMode,
     bool? autoTranslate,
+    double? aiTaskBudget,
     bool? loaded,
   }) {
     return AppSettings(
@@ -32,6 +38,7 @@ class AppSettings {
       lineHeight: lineHeight ?? this.lineHeight,
       defaultReadingMode: defaultReadingMode ?? this.defaultReadingMode,
       autoTranslate: autoTranslate ?? this.autoTranslate,
+      aiTaskBudget: aiTaskBudget ?? this.aiTaskBudget,
       loaded: loaded ?? this.loaded,
     );
   }
@@ -43,6 +50,7 @@ class SettingsController extends Notifier<AppSettings> {
   static const _keyLine = 'line_height';
   static const _keyMode = 'default_reading_mode';
   static const _keyAuto = 'auto_translate';
+  static const _keyAiTaskBudget = 'ai_task_budget';
 
   @override
   AppSettings build() => const AppSettings();
@@ -55,6 +63,7 @@ class SettingsController extends Notifier<AppSettings> {
       lineHeight: prefs.getDouble(_keyLine) ?? 1.9,
       defaultReadingMode: prefs.getString(_keyMode) ?? 'alternating',
       autoTranslate: prefs.getBool(_keyAuto) ?? false,
+      aiTaskBudget: prefs.getDouble(_keyAiTaskBudget) ?? 0,
       loaded: true,
     );
   }
@@ -89,6 +98,13 @@ class SettingsController extends Notifier<AppSettings> {
     state = state.copyWith(autoTranslate: value);
     final prefs = await SharedPreferences.getInstance();
     await prefs.setBool(_keyAuto, value);
+  }
+
+  Future<void> setAiTaskBudget(double value) async {
+    final budget = value < 0 ? 0.0 : value;
+    state = state.copyWith(aiTaskBudget: budget);
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setDouble(_keyAiTaskBudget, budget);
   }
 }
 

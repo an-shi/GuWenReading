@@ -472,11 +472,11 @@ class _SentenceSheetState extends ConsumerState<_SentenceSheet> {
     }
   }
 
-  Future<void> _retranslateSentence() async {
+  Future<void> _retranslateSentence({bool useCache = true}) async {
     try {
       await ref
           .read(translationServiceProvider)
-          .retranslateSentence(widget.sentence.id);
+          .retranslateSentence(widget.sentence.id, useCache: useCache);
       if (!mounted) return;
       Navigator.pop(context);
     } catch (error) {
@@ -658,9 +658,14 @@ class _SentenceSheetState extends ConsumerState<_SentenceSheet> {
                   label: Text(sentence.translation == null ? '添加人工译文' : '修改译文'),
                 ),
                 TextButton.icon(
-                  onPressed: _retranslateSentence,
+                  onPressed: () => _retranslateSentence(),
                   icon: const Icon(Icons.translate_rounded, size: 18),
                   label: const Text('重新翻译此句'),
+                ),
+                TextButton.icon(
+                  onPressed: () => _retranslateSentence(useCache: false),
+                  icon: const Icon(Icons.refresh_rounded, size: 18),
+                  label: const Text('强制重译'),
                 ),
               ],
             ),

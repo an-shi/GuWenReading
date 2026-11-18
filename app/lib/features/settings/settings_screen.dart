@@ -542,7 +542,9 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
                     leading: const Icon(Icons.inventory_2_outlined),
                     title: Text(backup.filename),
                     subtitle: Text(
-                      '${_formatSize(backup.size)} · ${_formatDate(backup.createdAt)}',
+                      '${backup.mode == BackupMode.full ? '完整' : '轻量'}'
+                      ' · ${_formatSize(backup.size)} · '
+                      '${_formatDate(backup.createdAt)}',
                     ),
                     trailing: Wrap(
                       spacing: 4,
@@ -1122,11 +1124,38 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
 
   // ------------------------------------------------------------------ backup
   Future<void> _createBackup() async {
+    final mode = await showDialog<BackupMode>(
+      context: context,
+      builder: (context) => SimpleDialog(
+        title: const Text('创建备份'),
+        children: [
+          SimpleDialogOption(
+            onPressed: () => Navigator.pop(context, BackupMode.full),
+            child: const ListTile(
+              contentPadding: EdgeInsets.zero,
+              leading: Icon(Icons.inventory_2_outlined),
+              title: Text('完整备份'),
+              subtitle: Text('正式数据、AI 用量、任务、Prompt 版本和缓存'),
+            ),
+          ),
+          SimpleDialogOption(
+            onPressed: () => Navigator.pop(context, BackupMode.light),
+            child: const ListTile(
+              contentPadding: EdgeInsets.zero,
+              leading: Icon(Icons.description_outlined),
+              title: Text('轻量备份'),
+              subtitle: Text('不包含可重新生成的缓存，体积更小'),
+            ),
+          ),
+        ],
+      ),
+    );
+    if (mode == null) return;
     try {
       setState(() => _busy = true);
-      await ref.read(backupServiceProvider).createBackup();
+      await ref.read(backupServiceProvider).createBackup(mode: mode);
       await _reload();
-      _toast('备份已创建');
+      _toast(mode == BackupMode.full ? '完整备份已创建' : '轻量备份已创建');
     } catch (error) {
       _toast('备份失败：$error', error: true);
     } finally {

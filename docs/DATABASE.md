@@ -119,15 +119,24 @@ covers/...
 backup.json
 ```
 
-`backup.json` 记录应用名、版本、创建时间与格式 `guwenreader.backup.v1`。
+`backup.json` 记录应用名、版本、创建时间、格式 `guwenreader.backup.v2`、备份格式版本、Schema 版本、备份模式和是否包含缓存。
+
+备份模式：
+
+- **完整备份**：数据库完整快照，包含正式数据、`ai_usage`、任务、Prompt 版本、审核记录和缓存。
+- **轻量备份**：生成快照后清空 `translation_sentence_cache`、`knowledge_chunk_cache`、`knowledge_extraction_state` 和 `translation_cache`，保留正式数据、用量、任务和 Prompt 版本。
 
 恢复流程：
 
-1. 解压备份数据库到临时目录。
-2. 将当前数据库复制到 `backups/restore-before-*.db`。
-3. `ATTACH DATABASE` 备份库，事务内清空并复制业务表。
-4. 替换 `books/` 与 `covers/` 文件。
-5. 重建 FTS 索引。
+1. 先读取 `backup.json`，检查格式和版本；格式或 Schema 版本过新时拒绝恢复。
+2. 解压备份数据库到临时目录。
+3. 将当前数据库复制到 `backups/restore-before-*.db`。
+4. `ATTACH DATABASE` 备份库，事务内清空并复制两边共有的列；旧备份缺少的新列使用默认值。
+5. 备份中不存在的缓存/用量表会清空，避免旧数据残留。
+6. 替换 `books/` 与 `covers/` 文件。
+7. 轻量备份恢复后再次清空缓存，并重建 FTS 索引。
+
+API Key 仍保存在系统安全存储，不进入备份文件。
 
 ## 5. 迁移
 

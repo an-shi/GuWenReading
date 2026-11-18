@@ -327,6 +327,12 @@ class AppDatabase {
       'prompt_version': 'INTEGER',
       'schema_version': 'INTEGER',
       'extracted_at': 'TEXT',
+      'paragraph_id': 'TEXT',
+      'evidence_type': "TEXT NOT NULL DEFAULT 'supporting'",
+      'source_kind': "TEXT NOT NULL DEFAULT 'ai'",
+      'note': 'TEXT',
+      'review_status': "TEXT NOT NULL DEFAULT 'pending'",
+      'created_at': 'TEXT',
     };
     const additions = <String, Map<String, String>>{
       'tasks': {
@@ -361,10 +367,21 @@ class AppDatabase {
       'historical_events': {
         'fingerprint': 'TEXT',
         'knowledge_type': "TEXT NOT NULL DEFAULT 'inferred'",
+        'time_end_raw': 'TEXT',
+        'location': 'TEXT',
+        'source_kind': "TEXT NOT NULL DEFAULT 'ai'",
+        'updated_by': 'TEXT',
       },
       'entities': {'knowledge_type': "TEXT NOT NULL DEFAULT 'explicit'"},
       'entity_relations': {
         'knowledge_type': "TEXT NOT NULL DEFAULT 'inferred'",
+        'valid_from_raw': 'TEXT',
+        'valid_from_year': 'INTEGER',
+        'valid_to_raw': 'TEXT',
+        'valid_to_year': 'INTEGER',
+        'time_precision': "TEXT NOT NULL DEFAULT 'unknown'",
+        'source_kind': "TEXT NOT NULL DEFAULT 'ai'",
+        'updated_by': 'TEXT',
       },
       'entity_mentions': provenanceColumns,
       'relation_sources': provenanceColumns,

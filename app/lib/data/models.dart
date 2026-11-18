@@ -640,6 +640,13 @@ class EntityRelation {
     this.description,
     this.status = 'inferred',
     this.knowledgeType = 'inferred',
+    this.confidence = 0.5,
+    this.validFromRaw,
+    this.validFromYear,
+    this.validToRaw,
+    this.validToYear,
+    this.timePrecision = 'unknown',
+    this.sourceKind = 'ai',
     this.sources = const [],
     this.otherId,
   });
@@ -649,6 +656,13 @@ class EntityRelation {
   final String? description;
   final String status;
   final String knowledgeType;
+  final double confidence;
+  final String? validFromRaw;
+  final int? validFromYear;
+  final String? validToRaw;
+  final int? validToYear;
+  final String timePrecision;
+  final String sourceKind;
   final List<RelationSource> sources;
   final String? otherId;
 
@@ -659,6 +673,13 @@ class EntityRelation {
     description: _str(json['description']),
     status: json['status'] as String? ?? 'inferred',
     knowledgeType: json['knowledge_type'] as String? ?? 'inferred',
+    confidence: (json['confidence'] as num? ?? 0.5).toDouble(),
+    validFromRaw: _str(json['valid_from_raw']),
+    validFromYear: json['valid_from_year'] as int?,
+    validToRaw: _str(json['valid_to_raw']),
+    validToYear: json['valid_to_year'] as int?,
+    timePrecision: json['time_precision'] as String? ?? 'unknown',
+    sourceKind: json['source_kind'] as String? ?? 'ai',
     otherId: _str(json['other_entity_id']),
     sources: (json['sources'] as List? ?? const [])
         .whereType<Map>()
@@ -668,15 +689,49 @@ class EntityRelation {
 }
 
 class RelationSource {
-  const RelationSource({this.quote, this.bookTitle, this.chapterTitle});
+  const RelationSource({
+    this.id,
+    this.quote,
+    this.bookId,
+    this.chapterId,
+    this.sentenceId,
+    this.paragraphId,
+    this.bookTitle,
+    this.chapterTitle,
+    this.evidenceType = 'supporting',
+    this.sourceKind = 'ai',
+    this.note,
+    this.reviewStatus = 'pending',
+    this.createdAt,
+  });
+  final String? id;
   final String? quote;
+  final String? bookId;
+  final String? chapterId;
+  final String? sentenceId;
+  final String? paragraphId;
   final String? bookTitle;
   final String? chapterTitle;
+  final String evidenceType;
+  final String sourceKind;
+  final String? note;
+  final String reviewStatus;
+  final String? createdAt;
 
   factory RelationSource.fromJson(Map<String, dynamic> json) => RelationSource(
+    id: _str(json['id']),
     quote: _str(json['quote']),
+    bookId: _str(json['book_id']),
+    chapterId: _str(json['chapter_id']),
+    sentenceId: _str(json['sentence_id']),
+    paragraphId: _str(json['paragraph_id']),
     bookTitle: _str(json['book_title']),
     chapterTitle: _str(json['chapter_title']),
+    evidenceType: json['evidence_type'] as String? ?? 'supporting',
+    sourceKind: json['source_kind'] as String? ?? 'ai',
+    note: _str(json['note']),
+    reviewStatus: json['review_status'] as String? ?? 'pending',
+    createdAt: _str(json['created_at']),
   );
 }
 
@@ -688,10 +743,15 @@ class HistoricalEvent {
     this.description,
     this.timeRaw,
     this.timeStartYear,
+    this.timeEndYear,
+    this.timeEndRaw,
+    this.location,
     this.timePrecision = 'unknown',
     this.dynasty,
     this.status = 'extracted',
     this.knowledgeType = 'inferred',
+    this.sourceKind = 'ai',
+    this.updatedBy,
     this.participants = const [],
     this.sources = const [],
   });
@@ -702,10 +762,15 @@ class HistoricalEvent {
   final String? description;
   final String? timeRaw;
   final int? timeStartYear;
+  final int? timeEndYear;
+  final String? timeEndRaw;
+  final String? location;
   final String timePrecision;
   final String? dynasty;
   final String status;
   final String knowledgeType;
+  final String sourceKind;
+  final String? updatedBy;
   final List<String> participants;
   final List<RelationSource> sources;
 
@@ -719,10 +784,17 @@ class HistoricalEvent {
         timeStartYear: json['time_start_year'] == null
             ? null
             : _int(json['time_start_year']),
+        timeEndYear: json['time_end_year'] == null
+            ? null
+            : _int(json['time_end_year']),
+        timeEndRaw: _str(json['time_end_raw']),
+        location: _str(json['location']),
         timePrecision: json['time_precision'] as String? ?? 'unknown',
         dynasty: _str(json['dynasty']),
         status: json['status'] as String? ?? 'extracted',
         knowledgeType: json['knowledge_type'] as String? ?? 'inferred',
+        sourceKind: json['source_kind'] as String? ?? 'ai',
+        updatedBy: _str(json['updated_by']),
         participants: (json['participants'] as List? ?? const [])
             .map((e) => e is Map ? (e['name'] as String? ?? '') : '$e')
             .where((e) => e.isNotEmpty)

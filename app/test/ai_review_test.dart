@@ -6,6 +6,96 @@ import 'package:guwenreader/core/local/local_store.dart';
 
 void main() {
   test(
+    'relation and event editing adds evidence and keeps audit trail',
+    () async {
+      final database = await AppDatabase.openInMemory();
+      final store = LocalStore(database);
+      final ai = AiSettingsService(store: store);
+      final knowledge = KnowledgeService(
+        store: store,
+        aiSettings: ai,
+        client: AiJsonClient(ai),
+      );
+      await store.insertEntity(
+        id: 'a',
+        canonicalName: '张三',
+        kind: 'person',
+        aliases: const [],
+      );
+      await store.insertEntity(
+        id: 'b',
+        canonicalName: '李四',
+        kind: 'person',
+        aliases: const [],
+      );
+      final relationId = await knowledge.createRelation(
+        fromEntityId: 'a',
+        toEntityId: 'b',
+        type: '朋友关系',
+        description: '少时同学',
+        validFromRaw: '贞观初',
+        validFromYear: 627,
+      );
+      await knowledge.addRelationEvidence(
+        relationId,
+        quote: '张三与李四友善。',
+        evidenceType: 'supporting',
+      );
+      final evidence = await knowledge.relationEvidence(relationId);
+      expect(evidence, hasLength(1));
+      expect(evidence.first['source_kind'], 'manual');
+      await knowledge.updateRelation(
+        relationId,
+        validToRaw: '贞观末',
+        validToYear: 649,
+        timePrecision: 'period',
+        status: 'confirmed',
+      );
+      final relation = await store.db.query(
+        'entity_relations',
+        where: 'id = ?',
+        whereArgs: [relationId],
+      );
+      expect(relation.first['valid_to_year'], 649);
+      expect(relation.first['status'], 'confirmed');
+      await knowledge.deleteRelationEvidence(evidence.first['id'] as String);
+      expect(await knowledge.relationEvidence(relationId), isEmpty);
+
+      final eventId = await knowledge.createEvent(
+        name: '测试事件',
+        type: 'war',
+        year: 630,
+        timeRaw: '贞观四年',
+        location: '定襄',
+      );
+      await knowledge.addEventEvidence(
+        eventId,
+        quote: '贞观四年春，大破突厥。',
+        evidenceType: 'supporting',
+      );
+      final eventEvidence = await knowledge.eventEvidence(eventId);
+      expect(eventEvidence, hasLength(1));
+      await knowledge.updateEvent(
+        eventId,
+        endYear: 631,
+        timeEndRaw: '贞观五年',
+        precision: 'period',
+        location: '定襄、阴山',
+      );
+      final event = await store.db.query(
+        'historical_events',
+        where: 'id = ?',
+        whereArgs: [eventId],
+      );
+      expect(event.first['time_end_year'], 631);
+      expect(event.first['location'], '定襄、阴山');
+      final audits = await knowledge.reviewHistory(targetType: 'event');
+      expect(audits, isNotEmpty);
+      await database.close();
+    },
+  );
+
+  test(
     'merge preserves evidence, dedupes relations and records audit',
     () async {
       final database = await AppDatabase.openInMemory();

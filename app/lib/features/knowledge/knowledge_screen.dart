@@ -7,6 +7,7 @@ import '../../providers.dart';
 import '../graph/graph_screen.dart';
 import '../reader/reader_screen.dart';
 import '../timeline/timeline_screen.dart';
+import 'relation_editor.dart';
 
 class KnowledgeScreen extends ConsumerStatefulWidget {
   const KnowledgeScreen({super.key});
@@ -468,6 +469,11 @@ class EntityDetailScreen extends ConsumerWidget {
       appBar: AppBar(
         title: const Text('人物资料'),
         actions: [
+          IconButton(
+            tooltip: '新增关系',
+            onPressed: () => _createRelation(context, ref),
+            icon: const Icon(Icons.add_link_rounded),
+          ),
           PopupMenuButton<String>(
             onSelected: (value) async {
               if (value == '__merge') {
@@ -611,6 +617,161 @@ class EntityDetailScreen extends ConsumerWidget {
     );
   }
 
+  Future<void> _createRelation(BuildContext context, WidgetRef ref) async {
+    final entities = await ref.read(knowledgeServiceProvider).listEntities();
+    if (!context.mounted) return;
+    final others = entities.where((item) => item.id != entityId).toList();
+    if (others.isEmpty) {
+      ScaffoldMessenger.of(context)
+          .showSnackBar(const SnackBar(content: Text('没有可关联的其他实体')));
+      return;
+    }
+    String? targetId;
+    var type = relationTypes.first;
+    final description = TextEditingController();
+    final fromRaw = TextEditingController();
+    final toRaw = TextEditingController();
+    final fromYear = TextEditingController();
+    final toYear = TextEditingController();
+    var precision = 'unknown';
+    final saved = await showDialog<bool>(
+      context: context,
+      builder: (context) => StatefulBuilder(
+        builder: (context, setDialogState) => AlertDialog(
+          title: const Text('新增关系'),
+          content: SizedBox(
+            width: 520,
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                DropdownButtonFormField<String>(
+                  initialValue: targetId,
+                  isExpanded: true,
+                  decoration: const InputDecoration(labelText: '目标实体'),
+                  items: [
+                    for (final entity in others)
+                      DropdownMenuItem(
+                        value: entity.id,
+                        child: Text('${entity.name} · ${entity.dynasty ?? ''}'),
+                      ),
+                  ],
+                  onChanged: (value) => setDialogState(() => targetId = value),
+                ),
+                const SizedBox(height: 10),
+                DropdownButtonFormField<String>(
+                  initialValue: type,
+                  decoration: const InputDecoration(labelText: '关系类型'),
+                  items: [
+                    for (final value in relationTypes)
+                      DropdownMenuItem(value: value, child: Text(value)),
+                  ],
+                  onChanged: (value) =>
+                      setDialogState(() => type = value ?? type),
+                ),
+                const SizedBox(height: 10),
+                TextField(
+                  controller: description,
+                  decoration: const InputDecoration(labelText: '关系描述'),
+                ),
+                const SizedBox(height: 10),
+                Row(
+                  children: [
+                    Expanded(
+                      child: TextField(
+                        controller: fromRaw,
+                        decoration: const InputDecoration(
+                          labelText: '有效开始（原文）',
+                        ),
+                      ),
+                    ),
+                    const SizedBox(width: 8),
+                    SizedBox(
+                      width: 110,
+                      child: TextField(
+                        controller: fromYear,
+                        keyboardType: TextInputType.number,
+                        decoration: const InputDecoration(labelText: '年份'),
+                      ),
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 8),
+                Row(
+                  children: [
+                    Expanded(
+                      child: TextField(
+                        controller: toRaw,
+                        decoration: const InputDecoration(
+                          labelText: '有效结束（原文）',
+                        ),
+                      ),
+                    ),
+                    const SizedBox(width: 8),
+                    SizedBox(
+                      width: 110,
+                      child: TextField(
+                        controller: toYear,
+                        keyboardType: TextInputType.number,
+                        decoration: const InputDecoration(labelText: '年份'),
+                      ),
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 8),
+                DropdownButtonFormField<String>(
+                  initialValue: precision,
+                  decoration: const InputDecoration(labelText: '时间精度'),
+                  items: [
+                    for (final value in timePrecisions)
+                      DropdownMenuItem(value: value, child: Text(value)),
+                  ],
+                  onChanged: (value) =>
+                      setDialogState(() => precision = value ?? precision),
+                ),
+              ],
+            ),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(context, false),
+              child: const Text('取消'),
+            ),
+            FilledButton(
+              onPressed: targetId == null
+                  ? null
+                  : () => Navigator.pop(context, true),
+              child: const Text('保存'),
+            ),
+          ],
+        ),
+      ),
+    );
+    if (saved == true && targetId != null) {
+      await ref
+          .read(knowledgeServiceProvider)
+          .createRelation(
+            fromEntityId: entityId,
+            toEntityId: targetId!,
+            type: type,
+            description: description.text.trim().isEmpty
+                ? null
+                : description.text.trim(),
+            validFromRaw: fromRaw.text.trim().isEmpty
+                ? null
+                : fromRaw.text.trim(),
+            validFromYear: int.tryParse(fromYear.text.trim()),
+            validToRaw: toRaw.text.trim().isEmpty ? null : toRaw.text.trim(),
+            validToYear: int.tryParse(toYear.text.trim()),
+            timePrecision: precision,
+          );
+      ref.invalidate(entityProvider(entityId));
+      ref.invalidate(graphProvider);
+    }
+    for (final controller in [description, fromRaw, toRaw, fromYear, toYear]) {
+      controller.dispose();
+    }
+  }
+
   Future<void> _mergeIntoOther(BuildContext context, WidgetRef ref) async {
     final entities = await ref.read(knowledgeServiceProvider).listEntities();
     if (!context.mounted) return;
@@ -740,8 +901,31 @@ class _RelationCard extends ConsumerWidget {
                   fontWeight: FontWeight.w600,
                 ),
               ),
+              const Spacer(),
+              IconButton(
+                tooltip: '编辑关系与证据',
+                icon: const Icon(Icons.edit_outlined, size: 18),
+                onPressed: () => showDialog<bool>(
+                  context: context,
+                  builder: (context) => RelationEditorDialog(
+                    entityId: entityId,
+                    relation: relation,
+                  ),
+                ),
+              ),
             ],
           ),
+          if (relation.validFromRaw != null || relation.validToRaw != null) ...[
+            const SizedBox(height: 2),
+            Text(
+              '有效时间：${relation.validFromRaw ?? '未知'}'
+              '${relation.validToRaw != null ? ' 至 ${relation.validToRaw}' : ''}'
+              ' · ${relation.timePrecision}',
+              style: theme.textTheme.labelSmall?.copyWith(
+                color: theme.colorScheme.onSurface.withValues(alpha: 0.42),
+              ),
+            ),
+          ],
           if (relation.description != null) ...[
             const SizedBox(height: 4),
             Text(
@@ -786,34 +970,42 @@ class _RelationCard extends ConsumerWidget {
               ),
             ),
           ],
-          if (relation.status != 'confirmed' || relation.status != 'rejected')
-            Padding(
-              padding: const EdgeInsets.only(top: 6),
-              child: Row(
-                children: [
-                  if (relation.status != 'confirmed')
-                    TextButton(
-                      onPressed: () async {
-                        await ref
-                            .read(knowledgeServiceProvider)
-                            .setRelationStatus(relation.id, 'confirmed');
-                        ref.invalidate(entityProvider(entityId));
-                      },
-                      child: const Text('确认'),
-                    ),
-                  if (relation.status != 'rejected')
-                    TextButton(
-                      onPressed: () async {
-                        await ref
-                            .read(knowledgeServiceProvider)
-                            .setRelationStatus(relation.id, 'rejected');
-                        ref.invalidate(entityProvider(entityId));
-                      },
-                      child: const Text('驳回'),
-                    ),
-                ],
-              ),
+          Padding(
+            padding: const EdgeInsets.only(top: 6),
+            child: Row(
+              children: [
+                if (relation.status != 'confirmed')
+                  TextButton(
+                    onPressed: () async {
+                      await ref
+                          .read(knowledgeServiceProvider)
+                          .setRelationStatus(relation.id, 'confirmed');
+                      ref.invalidate(entityProvider(entityId));
+                    },
+                    child: const Text('确认'),
+                  ),
+                if (relation.status != 'rejected')
+                  TextButton(
+                    onPressed: () async {
+                      await ref
+                          .read(knowledgeServiceProvider)
+                          .setRelationStatus(relation.id, 'rejected');
+                      ref.invalidate(entityProvider(entityId));
+                    },
+                    child: const Text('驳回'),
+                  ),
+                const Spacer(),
+                Text(
+                  relation.sources.isEmpty
+                      ? '无证据'
+                      : '${relation.sources.length} 条证据',
+                  style: theme.textTheme.labelSmall?.copyWith(
+                    color: theme.colorScheme.onSurface.withValues(alpha: 0.4),
+                  ),
+                ),
+              ],
             ),
+          ),
         ],
       ),
     );

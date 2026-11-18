@@ -219,6 +219,13 @@ const List<String> schemaStatements = [
     status TEXT NOT NULL DEFAULT 'inferred',
     knowledge_type TEXT NOT NULL DEFAULT 'inferred',
     confidence REAL NOT NULL DEFAULT 0.5,
+    valid_from_raw TEXT,
+    valid_from_year INTEGER,
+    valid_to_raw TEXT,
+    valid_to_year INTEGER,
+    time_precision TEXT NOT NULL DEFAULT 'unknown',
+    source_kind TEXT NOT NULL DEFAULT 'ai',
+    updated_by TEXT,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
   )
@@ -239,7 +246,13 @@ const List<String> schemaStatements = [
     model_id TEXT,
     prompt_version INTEGER,
     schema_version INTEGER,
-    extracted_at TEXT
+    extracted_at TEXT,
+    paragraph_id TEXT,
+    evidence_type TEXT NOT NULL DEFAULT 'supporting',
+    source_kind TEXT NOT NULL DEFAULT 'ai',
+    note TEXT,
+    review_status TEXT NOT NULL DEFAULT 'pending',
+    created_at TEXT
   )
   ''',
   '''
@@ -252,10 +265,14 @@ const List<String> schemaStatements = [
     time_raw TEXT,
     time_start_year INTEGER,
     time_end_year INTEGER,
+    time_end_raw TEXT,
+    location TEXT,
     time_precision TEXT NOT NULL DEFAULT 'unknown',
     time_note TEXT,
     status TEXT NOT NULL DEFAULT 'extracted',
     knowledge_type TEXT NOT NULL DEFAULT 'inferred',
+    source_kind TEXT NOT NULL DEFAULT 'ai',
+    updated_by TEXT,
     fingerprint TEXT,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
@@ -285,7 +302,13 @@ const List<String> schemaStatements = [
     model_id TEXT,
     prompt_version INTEGER,
     schema_version INTEGER,
-    extracted_at TEXT
+    extracted_at TEXT,
+    paragraph_id TEXT,
+    evidence_type TEXT NOT NULL DEFAULT 'supporting',
+    source_kind TEXT NOT NULL DEFAULT 'ai',
+    note TEXT,
+    review_status TEXT NOT NULL DEFAULT 'pending',
+    created_at TEXT
   )
   ''',
   '''

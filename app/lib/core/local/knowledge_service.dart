@@ -1348,10 +1348,16 @@ class KnowledgeService {
     );
     final relations = <EntityRelation>[];
     for (final relation in relationRows) {
-      final sources = await store.db.query(
-        'relation_sources',
-        where: 'relation_id = ?',
-        whereArgs: [relation['id']],
+      final sources = await store.db.rawQuery(
+        '''
+        SELECT s.*, b.title AS book_title, c.title AS chapter_title
+        FROM relation_sources s
+        LEFT JOIN books b ON b.id = s.book_id
+        LEFT JOIN chapters c ON c.id = s.chapter_id
+        WHERE s.relation_id = ?
+        ORDER BY s.created_at ASC, s.id ASC
+        ''',
+        [relation['id']],
       );
       relations.add(
         EntityRelation(
@@ -1362,12 +1368,30 @@ class KnowledgeService {
           description: relation['description'] as String?,
           status: relation['status'] as String? ?? 'inferred',
           knowledgeType: relation['knowledge_type'] as String? ?? 'inferred',
+          confidence: (relation['confidence'] as num? ?? 0.5).toDouble(),
+          validFromRaw: relation['valid_from_raw'] as String?,
+          validFromYear: relation['valid_from_year'] as int?,
+          validToRaw: relation['valid_to_raw'] as String?,
+          validToYear: relation['valid_to_year'] as int?,
+          timePrecision: relation['time_precision'] as String? ?? 'unknown',
+          sourceKind: relation['source_kind'] as String? ?? 'ai',
           sources: [
             for (final source in sources)
               RelationSource(
+                id: source['id'] as String?,
                 quote: source['quote'] as String?,
-                bookTitle: null,
-                chapterTitle: null,
+                bookId: source['book_id'] as String?,
+                chapterId: source['chapter_id'] as String?,
+                sentenceId: source['sentence_id'] as String?,
+                paragraphId: source['paragraph_id'] as String?,
+                bookTitle: source['book_title'] as String?,
+                chapterTitle: source['chapter_title'] as String?,
+                evidenceType:
+                    source['evidence_type'] as String? ?? 'supporting',
+                sourceKind: source['source_kind'] as String? ?? 'ai',
+                note: source['note'] as String?,
+                reviewStatus: source['review_status'] as String? ?? 'pending',
+                createdAt: source['created_at'] as String?,
               ),
           ],
         ),
@@ -1506,11 +1530,25 @@ class KnowledgeService {
     String? type,
     String? description,
     String? status,
+    String? validFromRaw,
+    int? validFromYear,
+    String? validToRaw,
+    int? validToYear,
+    String? timePrecision,
+    double? confidence,
   }) async {
     final updates = <String, Object?>{
       if (type != null && type.trim().isNotEmpty) 'relation_type': type.trim(),
       if (description != null) 'description': description,
       if (status != null) 'status': status,
+      if (validFromRaw != null) 'valid_from_raw': validFromRaw,
+      if (validFromYear != null) 'valid_from_year': validFromYear,
+      if (validToRaw != null) 'valid_to_raw': validToRaw,
+      if (validToYear != null) 'valid_to_year': validToYear,
+      if (timePrecision != null) 'time_precision': timePrecision,
+      if (confidence != null) 'confidence': confidence.clamp(0.0, 1.0),
+      'source_kind': 'manual',
+      'updated_by': 'human',
       'updated_at': nowIso(),
     };
     await store.db.transaction((txn) async {
@@ -1537,12 +1575,161 @@ class KnowledgeService {
     });
   }
 
+  Future<String> createRelation({
+    required String fromEntityId,
+    required String toEntityId,
+    required String type,
+    String? description,
+    String? validFromRaw,
+    int? validFromYear,
+    String? validToRaw,
+    int? validToYear,
+    String timePrecision = 'unknown',
+    double confidence = 1.0,
+    String status = 'pending',
+  }) async {
+    final id = newLocalId('rel');
+    final now = nowIso();
+    await store.db.transaction((txn) async {
+      await txn.insert('entity_relations', {
+        'id': id,
+        'from_entity_id': fromEntityId,
+        'to_entity_id': toEntityId,
+        'relation_type': type,
+        'label': type,
+        'description': description,
+        'status': status,
+        'knowledge_type': 'human_verified',
+        'confidence': confidence.clamp(0.0, 1.0),
+        'valid_from_raw': validFromRaw,
+        'valid_from_year': validFromYear,
+        'valid_to_raw': validToRaw,
+        'valid_to_year': validToYear,
+        'time_precision': timePrecision,
+        'source_kind': 'manual',
+        'updated_by': 'human',
+        'created_at': now,
+        'updated_at': now,
+      });
+      await _audit(
+        txn,
+        targetType: 'relation',
+        targetId: id,
+        action: 'create',
+        after: {
+          'from_entity_id': fromEntityId,
+          'to_entity_id': toEntityId,
+          'relation_type': type,
+        },
+      );
+    });
+    return id;
+  }
+
+  Future<void> deleteRelation(String id) async {
+    await store.db.transaction((txn) async {
+      final before = await txn.query(
+        'entity_relations',
+        where: 'id = ?',
+        whereArgs: [id],
+        limit: 1,
+      );
+      if (before.isEmpty) return;
+      await txn.delete(
+        'relation_sources',
+        where: 'relation_id = ?',
+        whereArgs: [id],
+      );
+      await txn.delete('entity_relations', where: 'id = ?', whereArgs: [id]);
+      await _audit(
+        txn,
+        targetType: 'relation',
+        targetId: id,
+        action: 'delete',
+        before: before.first,
+      );
+    });
+  }
+
+  Future<String> addRelationEvidence(
+    String relationId, {
+    String? sentenceId,
+    String? bookId,
+    String? chapterId,
+    String? paragraphId,
+    required String quote,
+    String evidenceType = 'supporting',
+    String? note,
+    String sourceKind = 'manual',
+    String reviewStatus = 'pending',
+  }) async {
+    final id = newLocalId('relsrc');
+    final now = nowIso();
+    await store.db.transaction((txn) async {
+      await txn.insert('relation_sources', {
+        'id': id,
+        'relation_id': relationId,
+        'sentence_id': sentenceId,
+        'book_id': bookId,
+        'chapter_id': chapterId,
+        'paragraph_id': paragraphId,
+        'quote': quote,
+        'evidence_type': evidenceType,
+        'source_kind': sourceKind,
+        'note': note,
+        'review_status': reviewStatus,
+        'created_at': now,
+        'extracted_at': now,
+      });
+      await _audit(
+        txn,
+        targetType: 'relation_evidence',
+        targetId: id,
+        action: 'add',
+        after: {
+          'relation_id': relationId,
+          'quote': quote,
+          'evidence_type': evidenceType,
+        },
+      );
+    });
+    return id;
+  }
+
+  Future<void> deleteRelationEvidence(String evidenceId) async {
+    await store.db.transaction((txn) async {
+      final before = await txn.query(
+        'relation_sources',
+        where: 'id = ?',
+        whereArgs: [evidenceId],
+        limit: 1,
+      );
+      if (before.isEmpty) return;
+      await txn.delete(
+        'relation_sources',
+        where: 'id = ?',
+        whereArgs: [evidenceId],
+      );
+      await _audit(
+        txn,
+        targetType: 'relation_evidence',
+        targetId: evidenceId,
+        action: 'delete',
+        before: before.first,
+      );
+    });
+  }
+
   Future<void> updateEvent(
     String id, {
     String? name,
     String? type,
+    String? description,
     String? timeRaw,
     int? year,
+    String? timeEndRaw,
+    int? endYear,
+    String? location,
     String? precision,
     String? status,
     bool markTimeReviewed = false,
@@ -1550,13 +1737,21 @@ class KnowledgeService {
     final updates = <String, Object?>{
       if (name != null && name.trim().isNotEmpty) 'name': name.trim(),
       if (type != null && type.trim().isNotEmpty) 'event_type': type.trim(),
+      if (description != null) 'description': description,
       if (timeRaw != null) 'time_raw': timeRaw,
       if (year != null) 'time_start_year': year,
-      if (year != null) 'time_end_year': year,
+      if (timeEndRaw != null) 'time_end_raw': timeEndRaw,
+      if (endYear != null) 'time_end_year': endYear,
+      if (location != null) 'location': location,
       if (precision != null) 'time_precision': precision,
       if (status != null) 'status': status,
+      'source_kind': 'manual',
+      'updated_by': 'human',
       'updated_at': nowIso(),
     };
+    if (markTimeReviewed) {
+      updates['time_precision'] = precision ?? 'estimated';
+    }
     await store.db.transaction((txn) async {
       final before = await txn.query(
         'historical_events',
@@ -1579,6 +1774,243 @@ class KnowledgeService {
         after: updates,
       );
     });
+  }
+
+  Future<String> createEvent({
+    required String name,
+    String type = '其他',
+    String? description,
+    String? timeRaw,
+    int? year,
+    String? timeEndRaw,
+    int? endYear,
+    String? location,
+    String timePrecision = 'unknown',
+    String status = 'pending',
+  }) async {
+    final id = newLocalId('event');
+    final now = nowIso();
+    await store.db.transaction((txn) async {
+      await txn.insert('historical_events', {
+        'id': id,
+        'name': name,
+        'event_type': type,
+        'description': description,
+        'dynasty': null,
+        'time_raw': timeRaw,
+        'time_start_year': year,
+        'time_end_raw': timeEndRaw,
+        'time_end_year': endYear,
+        'location': location,
+        'time_precision': timePrecision,
+        'time_note': null,
+        'status': status,
+        'knowledge_type': 'human_verified',
+        'source_kind': 'manual',
+        'updated_by': 'human',
+        'created_at': now,
+        'updated_at': now,
+      });
+      await _audit(
+        txn,
+        targetType: 'event',
+        targetId: id,
+        action: 'create',
+        after: {'name': name, 'event_type': type},
+      );
+    });
+    return id;
+  }
+
+  Future<void> deleteEvent(String id) async {
+    await store.db.transaction((txn) async {
+      final before = await txn.query(
+        'historical_events',
+        where: 'id = ?',
+        whereArgs: [id],
+        limit: 1,
+      );
+      if (before.isEmpty) return;
+      await txn.delete('event_sources', where: 'event_id = ?', whereArgs: [id]);
+      await txn.delete(
+        'event_participants',
+        where: 'event_id = ?',
+        whereArgs: [id],
+      );
+      await txn.delete('historical_events', where: 'id = ?', whereArgs: [id]);
+      await _audit(
+        txn,
+        targetType: 'event',
+        targetId: id,
+        action: 'delete',
+        before: before.first,
+      );
+    });
+  }
+
+  Future<String> addEventEvidence(
+    String eventId, {
+    String? sentenceId,
+    String? bookId,
+    String? chapterId,
+    String? paragraphId,
+    required String quote,
+    String evidenceType = 'supporting',
+    String? note,
+    String sourceKind = 'manual',
+    String reviewStatus = 'pending',
+  }) async {
+    final id = newLocalId('esrc');
+    final now = nowIso();
+    await store.db.transaction((txn) async {
+      await txn.insert('event_sources', {
+        'id': id,
+        'event_id': eventId,
+        'sentence_id': sentenceId,
+        'book_id': bookId,
+        'chapter_id': chapterId,
+        'paragraph_id': paragraphId,
+        'quote': quote,
+        'evidence_type': evidenceType,
+        'source_kind': sourceKind,
+        'note': note,
+        'review_status': reviewStatus,
+        'created_at': now,
+        'extracted_at': now,
+      });
+      await _audit(
+        txn,
+        targetType: 'event_evidence',
+        targetId: id,
+        action: 'add',
+        after: {
+          'event_id': eventId,
+          'quote': quote,
+          'evidence_type': evidenceType,
+        },
+      );
+    });
+    return id;
+  }
+
+  Future<void> deleteEventEvidence(String evidenceId) async {
+    await store.db.transaction((txn) async {
+      final before = await txn.query(
+        'event_sources',
+        where: 'id = ?',
+        whereArgs: [evidenceId],
+        limit: 1,
+      );
+      if (before.isEmpty) return;
+      await txn.delete(
+        'event_sources',
+        where: 'id = ?',
+        whereArgs: [evidenceId],
+      );
+      await _audit(
+        txn,
+        targetType: 'event_evidence',
+        targetId: evidenceId,
+        action: 'delete',
+        before: before.first,
+      );
+    });
+  }
+
+  Future<void> mergeEvents(String primaryId, List<String> otherIds) async {
+    if (otherIds.isEmpty) return;
+    await store.db.transaction((txn) async {
+      for (final otherId in otherIds) {
+        if (otherId == primaryId) continue;
+        final other = await txn.query(
+          'historical_events',
+          where: 'id = ?',
+          whereArgs: [otherId],
+          limit: 1,
+        );
+        if (other.isEmpty) continue;
+        await txn.update(
+          'event_sources',
+          {'event_id': primaryId},
+          where: 'event_id = ?',
+          whereArgs: [otherId],
+        );
+        await txn.update(
+          'event_participants',
+          {'event_id': primaryId},
+          where: 'event_id = ?',
+          whereArgs: [otherId],
+        );
+        await txn.delete(
+          'historical_events',
+          where: 'id = ?',
+          whereArgs: [otherId],
+        );
+        await _audit(
+          txn,
+          targetType: 'event',
+          targetId: otherId,
+          action: 'merge_into:$primaryId',
+          before: other.first,
+          after: {'merged_into': primaryId},
+        );
+      }
+      await _dedupeParticipants(txn);
+      await _dedupeEventSources(txn);
+    });
+  }
+
+  Future<void> _dedupeEventSources(DatabaseExecutor txn) async {
+    final groups = await txn.rawQuery('''
+      SELECT event_id, COALESCE(sentence_id, '') AS sid, quote,
+             GROUP_CONCAT(id) AS ids
+      FROM event_sources GROUP BY event_id, sid, quote HAVING COUNT(*) > 1
+      ''');
+    for (final group in groups) {
+      final ids = '${group['ids']}'
+          .split(',')
+          .where((id) => id.isNotEmpty)
+          .toList();
+      for (final duplicate in ids.skip(1)) {
+        await txn.delete(
+          'event_sources',
+          where: 'id = ?',
+          whereArgs: [duplicate],
+        );
+      }
+    }
+  }
+
+  Future<List<Map<String, Object?>>> relationEvidence(String relationId) async {
+    return store.db.rawQuery(
+      '''
+      SELECT s.*, b.title AS book_title, c.title AS chapter_title,
+             se.original_text AS sentence_text
+      FROM relation_sources s
+      LEFT JOIN books b ON b.id = s.book_id
+      LEFT JOIN chapters c ON c.id = s.chapter_id
+      LEFT JOIN sentences se ON se.id = s.sentence_id
+      WHERE s.relation_id = ?
+      ORDER BY s.created_at ASC, s.id ASC
+      ''',
+      [relationId],
+    );
+  }
+
+  Future<List<Map<String, Object?>>> eventEvidence(String eventId) async {
+    return store.db.rawQuery(
+      '''
+      SELECT s.*, b.title AS book_title, c.title AS chapter_title,
+             se.original_text AS sentence_text
+      FROM event_sources s
+      LEFT JOIN books b ON b.id = s.book_id
+      LEFT JOIN chapters c ON c.id = s.chapter_id
+      LEFT JOIN sentences se ON se.id = s.sentence_id
+      WHERE s.event_id = ?
+      ORDER BY s.created_at ASC, s.id ASC
+      ''',
+      [eventId],
+    );
   }
 
   Future<void> _audit(
@@ -1889,10 +2321,15 @@ class KnowledgeService {
           description: row['description'] as String?,
           timeRaw: row['time_raw'] as String?,
           timeStartYear: row['time_start_year'] as int?,
+          timeEndYear: row['time_end_year'] as int?,
+          timeEndRaw: row['time_end_raw'] as String?,
+          location: row['location'] as String?,
           timePrecision: row['time_precision'] as String? ?? 'unknown',
           dynasty: row['dynasty'] as String?,
           status: row['status'] as String? ?? 'extracted',
           knowledgeType: row['knowledge_type'] as String? ?? 'inferred',
+          sourceKind: row['source_kind'] as String? ?? 'ai',
+          updatedBy: row['updated_by'] as String?,
         ),
     ];
   }
@@ -1927,10 +2364,15 @@ class KnowledgeService {
       description: row['description'] as String?,
       timeRaw: row['time_raw'] as String?,
       timeStartYear: row['time_start_year'] as int?,
+      timeEndYear: row['time_end_year'] as int?,
+      timeEndRaw: row['time_end_raw'] as String?,
+      location: row['location'] as String?,
       timePrecision: row['time_precision'] as String? ?? 'unknown',
       dynasty: row['dynasty'] as String?,
       status: row['status'] as String? ?? 'extracted',
       knowledgeType: row['knowledge_type'] as String? ?? 'inferred',
+      sourceKind: row['source_kind'] as String? ?? 'ai',
+      updatedBy: row['updated_by'] as String?,
       participants: [
         for (final participant in participantRows)
           participant['name'] as String,
@@ -1938,9 +2380,19 @@ class KnowledgeService {
       sources: [
         for (final source in sourceRows)
           RelationSource(
+            id: source['id'] as String?,
             quote: source['quote'] as String?,
+            bookId: source['book_id'] as String?,
+            chapterId: source['chapter_id'] as String?,
+            sentenceId: source['sentence_id'] as String?,
+            paragraphId: source['paragraph_id'] as String?,
             bookTitle: source['book_title'] as String?,
             chapterTitle: source['chapter_title'] as String?,
+            evidenceType: source['evidence_type'] as String? ?? 'supporting',
+            sourceKind: source['source_kind'] as String? ?? 'ai',
+            note: source['note'] as String?,
+            reviewStatus: source['review_status'] as String? ?? 'pending',
+            createdAt: source['created_at'] as String?,
           ),
       ],
     );

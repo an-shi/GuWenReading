@@ -3,6 +3,8 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../data/models.dart';
 import '../../providers.dart';
+import '../knowledge/event_editor.dart';
+import '../knowledge/relation_editor.dart';
 
 class TimelineScreen extends ConsumerStatefulWidget {
   const TimelineScreen({super.key});
@@ -14,6 +16,112 @@ class TimelineScreen extends ConsumerStatefulWidget {
 class _TimelineScreenState extends ConsumerState<TimelineScreen> {
   bool _includeExtracted = true;
 
+  Future<void> _createEvent() async {
+    final name = TextEditingController();
+    final year = TextEditingController();
+    final timeRaw = TextEditingController();
+    final location = TextEditingController();
+    var type = 'other';
+    var precision = 'unknown';
+    final saved = await showDialog<bool>(
+      context: context,
+      builder: (context) => StatefulBuilder(
+        builder: (context, setDialogState) => AlertDialog(
+          title: const Text('新增历史事件'),
+          content: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              TextField(
+                controller: name,
+                decoration: const InputDecoration(labelText: '事件名称'),
+              ),
+              const SizedBox(height: 10),
+              DropdownButtonFormField<String>(
+                initialValue: type,
+                decoration: const InputDecoration(labelText: '事件类型'),
+                items: [
+                  for (final value in eventTypes)
+                    DropdownMenuItem(
+                      value: value,
+                      child: Text(eventTypeLabel(value)),
+                    ),
+                ],
+                onChanged: (value) =>
+                    setDialogState(() => type = value ?? type),
+              ),
+              const SizedBox(height: 10),
+              Row(
+                children: [
+                  Expanded(
+                    child: TextField(
+                      controller: timeRaw,
+                      decoration: const InputDecoration(
+                        labelText: '时间原文',
+                        hintText: '如：贞观三年',
+                      ),
+                    ),
+                  ),
+                  const SizedBox(width: 10),
+                  SizedBox(
+                    width: 130,
+                    child: TextField(
+                      controller: year,
+                      keyboardType: TextInputType.number,
+                      decoration: const InputDecoration(labelText: '年份'),
+                    ),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 10),
+              DropdownButtonFormField<String>(
+                initialValue: precision,
+                decoration: const InputDecoration(labelText: '时间精度'),
+                items: [
+                  for (final value in timePrecisions)
+                    DropdownMenuItem(value: value, child: Text(value)),
+                ],
+                onChanged: (value) =>
+                    setDialogState(() => precision = value ?? precision),
+              ),
+              const SizedBox(height: 10),
+              TextField(
+                controller: location,
+                decoration: const InputDecoration(labelText: '发生地点'),
+              ),
+            ],
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(context, false),
+              child: const Text('取消'),
+            ),
+            FilledButton(
+              onPressed: () => Navigator.pop(context, true),
+              child: const Text('保存'),
+            ),
+          ],
+        ),
+      ),
+    );
+    if (saved == true && name.text.trim().isNotEmpty) {
+      await ref
+          .read(knowledgeServiceProvider)
+          .createEvent(
+            name: name.text.trim(),
+            type: type,
+            timeRaw: timeRaw.text.trim(),
+            year: int.tryParse(year.text.trim()),
+            location: location.text.trim(),
+            timePrecision: precision,
+          );
+      ref.invalidate(timelineProvider);
+      ref.invalidate(eventsProvider);
+    }
+    for (final controller in [name, year, timeRaw, location]) {
+      controller.dispose();
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
@@ -22,6 +130,11 @@ class _TimelineScreenState extends ConsumerState<TimelineScreen> {
       appBar: AppBar(
         title: const Text('历史时间线'),
         actions: [
+          IconButton(
+            tooltip: '新增事件',
+            onPressed: _createEvent,
+            icon: const Icon(Icons.add_rounded),
+          ),
           IconButton(
             tooltip: '刷新',
             onPressed: () => ref.invalidate(timelineProvider),
@@ -236,6 +349,20 @@ class _TimelineScreenState extends ConsumerState<TimelineScreen> {
                     },
                     child: const Text('驳回'),
                   ),
+                const Spacer(),
+                FilledButton.tonalIcon(
+                  onPressed: () async {
+                    final saved = await showDialog<bool>(
+                      context: context,
+                      builder: (context) => EventEditorDialog(event: detail),
+                    );
+                    if (saved == true && context.mounted) {
+                      Navigator.pop(context);
+                    }
+                  },
+                  icon: const Icon(Icons.edit_outlined, size: 18),
+                  label: const Text('编辑事件与证据'),
+                ),
               ],
             ),
           ],

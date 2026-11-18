@@ -1,6 +1,9 @@
+import 'dart:convert';
+
 import 'package:flutter_test/flutter_test.dart';
 import 'package:guwenreader/core/local/ai_service.dart';
 import 'package:guwenreader/core/local/app_database.dart';
+import 'package:guwenreader/core/local/import_service.dart';
 import 'package:guwenreader/core/local/knowledge_service.dart';
 import 'package:guwenreader/core/local/local_store.dart';
 
@@ -94,6 +97,73 @@ void main() {
       await database.close();
     },
   );
+
+  test('paragraph evidence review status and context are traceable', () async {
+    final database = await AppDatabase.openInMemory();
+    final store = LocalStore(database);
+    final ai = AiSettingsService(store: store);
+    final knowledge = KnowledgeService(
+      store: store,
+      aiSettings: ai,
+      client: AiJsonClient(ai),
+    );
+    final book = await ImportService(store: store, paths: database.paths)
+        .importBytes(
+          filename: 'test.txt',
+          bytes: utf8.encode('第一章 测试\n张三与李四友善。二人同游。\n'),
+        );
+    final chapter = (await store.listChapters(book.id)).first;
+    final content = await store.chapterContent(chapter.id);
+    final paragraph = content!.paragraphs.first;
+    final sentence = paragraph.sentences.first;
+    await store.insertEntity(
+      id: 'a',
+      canonicalName: '张三',
+      kind: 'person',
+      aliases: const [],
+    );
+    await store.insertEntity(
+      id: 'b',
+      canonicalName: '李四',
+      kind: 'person',
+      aliases: const [],
+    );
+    final relationId = await knowledge.createRelation(
+      fromEntityId: 'a',
+      toEntityId: 'b',
+      type: '朋友关系',
+    );
+    final evidenceId = await knowledge.addRelationEvidence(
+      relationId,
+      quote: paragraph.originalText,
+      bookId: book.id,
+      chapterId: chapter.id,
+      paragraphId: paragraph.id,
+      evidenceType: 'supporting',
+    );
+    var rows = await knowledge.relationEvidence(relationId);
+    expect(rows.first['paragraph_id'], paragraph.id);
+    await knowledge.setEvidenceReviewStatus(
+      targetType: 'relation',
+      evidenceId: evidenceId,
+      status: 'confirmed',
+    );
+    rows = await knowledge.relationEvidence(relationId);
+    expect(rows.first['review_status'], 'confirmed');
+    final history = await knowledge.evidenceHistory('relation', evidenceId);
+    expect(history.any((row) => row['action'] == 'review_confirmed'), isTrue);
+
+    final context = await knowledge.evidenceContext(
+      bookId: book.id,
+      chapterId: chapter.id,
+      sentenceId: sentence.id,
+      paragraphId: paragraph.id,
+    );
+    expect(context, isNotNull);
+    expect('${context!['chapter_title']}', '第一章 测试');
+    expect('${context['quote']}', paragraph.originalText);
+    await database.close();
+  });
 
   test(
     'merge preserves evidence, dedupes relations and records audit',

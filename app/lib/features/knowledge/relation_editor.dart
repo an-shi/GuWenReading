@@ -3,6 +3,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../data/models.dart';
 import '../../providers.dart';
+import '../reader/reader_screen.dart';
 
 const relationTypes = [
   '君臣关系',
@@ -57,6 +58,113 @@ String evidenceTypeLabel(String value) => switch (value) {
   'inferred' => '推断',
   _ => '支持',
 };
+
+String evidenceStatusLabel(String value) => switch (value) {
+  'confirmed' => '已确认',
+  'rejected' => '已驳回',
+  'disputed' => '存在争议',
+  _ => '待审核',
+};
+
+Future<void> showEvidenceContext(
+  BuildContext context,
+  WidgetRef ref,
+  Map<String, Object?> row, {
+  required String targetType,
+  required String targetId,
+}) async {
+  final contextData = await ref
+      .read(knowledgeServiceProvider)
+      .evidenceContext(
+        bookId: '${row['book_id'] ?? ''}',
+        chapterId: row['chapter_id'] as String?,
+        sentenceId: row['sentence_id'] as String?,
+        paragraphId: row['paragraph_id'] as String?,
+      );
+  if (!context.mounted) return;
+  await showDialog<void>(
+    context: context,
+    builder: (context) => AlertDialog(
+      title: const Text('证据上下文'),
+      content: SizedBox(
+        width: 680,
+        child: SingleChildScrollView(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(
+                '关联对象：${targetType == 'relation' ? '关系' : '事件'} · $targetId',
+                style: Theme.of(context).textTheme.labelSmall,
+              ),
+              const SizedBox(height: 8),
+              Text(
+                '${row['quote'] ?? ''}',
+                style: const TextStyle(height: 1.8),
+              ),
+              const SizedBox(height: 10),
+              if (contextData != null) ...[
+                Text(
+                  '${contextData['book_id']} · ${contextData['chapter_title'] ?? ''}'
+                  ' · 第 ${contextData['paragraph_index']} 段'
+                  '${contextData['sentence_index'] != null ? ' · 第 ${contextData['sentence_index']} 句' : ''}',
+                  style: Theme.of(context).textTheme.labelSmall,
+                ),
+                if ('${contextData['before'] ?? ''}'.isNotEmpty) ...[
+                  const SizedBox(height: 8),
+                  Text('前文：${contextData['before']}'),
+                ],
+                if ('${contextData['after'] ?? ''}'.isNotEmpty) ...[
+                  const SizedBox(height: 8),
+                  Text('后文：${contextData['after']}'),
+                ],
+              ] else
+                const Text('无法定位到原文位置，仅保留来源信息。'),
+              const SizedBox(height: 10),
+              Text(
+                '${evidenceTypeLabel('${row['evidence_type'] ?? 'supporting'}')}'
+                ' · ${evidenceStatusLabel('${row['review_status'] ?? 'pending'}')}'
+                ' · ${row['source_kind'] == 'manual'
+                    ? '人工'
+                    : row['source_kind'] == 'external'
+                    ? '外部补充'
+                    : 'AI'}',
+                style: Theme.of(context).textTheme.labelSmall,
+              ),
+              if (row['note'] != null && '${row['note']}'.isNotEmpty) ...[
+                const SizedBox(height: 8),
+                Text('备注：${row['note']}'),
+              ],
+            ],
+          ),
+        ),
+      ),
+      actions: [
+        if (contextData?['chapter_id'] != null)
+          TextButton.icon(
+            onPressed: () {
+              Navigator.pop(context);
+              Navigator.of(context).push(
+                MaterialPageRoute(
+                  builder: (_) => ReaderScreen(
+                    bookId: '${contextData!['book_id']}',
+                    chapterId: '${contextData['chapter_id']}',
+                    chapterTitle: '${contextData['chapter_title'] ?? ''}',
+                    bookTitle: '',
+                  ),
+                ),
+              );
+            },
+            icon: const Icon(Icons.menu_book_rounded),
+            label: const Text('打开原文'),
+          ),
+        TextButton(
+          onPressed: () => Navigator.pop(context),
+          child: const Text('关闭'),
+        ),
+      ],
+    ),
+  );
+}
 
 class RelationEditorDialog extends ConsumerStatefulWidget {
   const RelationEditorDialog({
@@ -320,16 +428,58 @@ class _RelationEditorDialogState extends ConsumerState<RelationEditorDialog> {
                       row['source_kind'] == 'manual' ? '人工' : 'AI',
                     ].where((item) => item.isNotEmpty).join(' · '),
                   ),
-                  trailing: IconButton(
-                    tooltip: '删除证据',
-                    icon: const Icon(Icons.delete_outline, size: 18),
-                    onPressed: () async {
-                      await ref
-                          .read(knowledgeServiceProvider)
-                          .deleteRelationEvidence(row['id'] as String);
-                      await _loadEvidence();
-                      await _loadHistory();
-                    },
+                  trailing: Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Text(
+                        evidenceStatusLabel(
+                          '${row['review_status'] ?? 'pending'}',
+                        ),
+                        style: theme.textTheme.labelSmall,
+                      ),
+                      IconButton(
+                        tooltip: '查看上下文',
+                        icon: const Icon(Icons.article_outlined, size: 18),
+                        onPressed: () => showEvidenceContext(
+                          context,
+                          ref,
+                          row,
+                          targetType: 'relation',
+                          targetId: widget.relation.id,
+                        ),
+                      ),
+                      PopupMenuButton<String>(
+                        tooltip: '证据审核',
+                        onSelected: (value) async {
+                          if (value == '__delete') {
+                            await ref
+                                .read(knowledgeServiceProvider)
+                                .deleteRelationEvidence(row['id'] as String);
+                          } else {
+                            await ref
+                                .read(knowledgeServiceProvider)
+                                .setEvidenceReviewStatus(
+                                  targetType: 'relation',
+                                  evidenceId: row['id'] as String,
+                                  status: value,
+                                );
+                          }
+                          await _loadEvidence();
+                          await _loadHistory();
+                        },
+                        itemBuilder: (context) => const [
+                          PopupMenuItem(
+                            value: 'confirmed',
+                            child: Text('确认证据'),
+                          ),
+                          PopupMenuItem(value: 'rejected', child: Text('驳回证据')),
+                          PopupMenuItem(value: 'disputed', child: Text('标记争议')),
+                          PopupMenuItem(value: 'pending', child: Text('恢复待审')),
+                          PopupMenuDivider(),
+                          PopupMenuItem(value: '__delete', child: Text('删除证据')),
+                        ],
+                      ),
+                    ],
                   ),
                 ),
             const SizedBox(height: 12),
@@ -439,9 +589,12 @@ class _EvidencePickerDialogState extends ConsumerState<EvidencePickerDialog> {
   List<Book> _books = const [];
   List<ChapterSummary> _chapters = const [];
   List<Sentence> _sentences = const [];
+  List<Paragraph> _paragraphs = const [];
   String? _bookId;
   String? _chapterId;
   String? _sentenceId;
+  String? _paragraphId;
+  bool _paragraphMode = false;
   String _evidenceType = 'supporting';
   String _sourceKind = 'manual';
   bool _loading = false;
@@ -482,7 +635,9 @@ class _EvidencePickerDialogState extends ConsumerState<EvidencePickerDialog> {
           : content.paragraphs
                 .expand((paragraph) => paragraph.sentences)
                 .toList();
+      _paragraphs = content?.paragraphs ?? const [];
       _sentenceId = null;
+      _paragraphId = null;
       _loading = false;
     });
   }
@@ -537,29 +692,65 @@ class _EvidencePickerDialogState extends ConsumerState<EvidencePickerDialog> {
                     },
                   ),
                   const SizedBox(height: 10),
-                  DropdownButtonFormField<String>(
-                    initialValue: _sentenceId,
-                    isExpanded: true,
-                    decoration: const InputDecoration(labelText: '原文句子'),
-                    items: [
-                      for (final sentence in _sentences)
-                        DropdownMenuItem(
-                          value: sentence.id,
-                          child: Text(
-                            sentence.originalText,
-                            maxLines: 2,
-                            overflow: TextOverflow.ellipsis,
-                          ),
-                        ),
-                    ],
-                    onChanged: (value) {
-                      setState(() => _sentenceId = value);
-                      final sentence = _sentences
-                          .where((item) => item.id == value)
-                          .firstOrNull;
-                      if (sentence != null) _quote.text = sentence.originalText;
-                    },
+                  SwitchListTile(
+                    contentPadding: EdgeInsets.zero,
+                    title: const Text('按段落选择证据'),
+                    value: _paragraphMode,
+                    onChanged: (value) =>
+                        setState(() => _paragraphMode = value),
                   ),
+                  if (_paragraphMode)
+                    DropdownButtonFormField<String>(
+                      initialValue: _paragraphId,
+                      isExpanded: true,
+                      decoration: const InputDecoration(labelText: '原文段落'),
+                      items: [
+                        for (var i = 0; i < _paragraphs.length; i++)
+                          DropdownMenuItem(
+                            value: _paragraphs[i].id,
+                            child: Text(
+                              '第 ${i + 1} 段 · ${_paragraphs[i].originalText}',
+                              maxLines: 2,
+                              overflow: TextOverflow.ellipsis,
+                            ),
+                          ),
+                      ],
+                      onChanged: (value) {
+                        setState(() => _paragraphId = value);
+                        final paragraph = _paragraphs
+                            .where((item) => item.id == value)
+                            .firstOrNull;
+                        if (paragraph != null) {
+                          _quote.text = paragraph.originalText;
+                        }
+                      },
+                    )
+                  else
+                    DropdownButtonFormField<String>(
+                      initialValue: _sentenceId,
+                      isExpanded: true,
+                      decoration: const InputDecoration(labelText: '原文句子'),
+                      items: [
+                        for (final sentence in _sentences)
+                          DropdownMenuItem(
+                            value: sentence.id,
+                            child: Text(
+                              sentence.originalText,
+                              maxLines: 2,
+                              overflow: TextOverflow.ellipsis,
+                            ),
+                          ),
+                      ],
+                      onChanged: (value) {
+                        setState(() => _sentenceId = value);
+                        final sentence = _sentences
+                            .where((item) => item.id == value)
+                            .firstOrNull;
+                        if (sentence != null) {
+                          _quote.text = sentence.originalText;
+                        }
+                      },
+                    ),
                   const SizedBox(height: 10),
                   TextField(
                     controller: _quote,
@@ -630,7 +821,8 @@ class _EvidencePickerDialogState extends ConsumerState<EvidencePickerDialog> {
               : () => Navigator.pop(context, {
                   'book_id': _bookId,
                   'chapter_id': _chapterId,
-                  'sentence_id': _sentenceId,
+                  'sentence_id': _paragraphMode ? null : _sentenceId,
+                  'paragraph_id': _paragraphMode ? _paragraphId : null,
                   'quote': _quote.text.trim(),
                   'evidence_type': _evidenceType,
                   'source_kind': _sourceKind,

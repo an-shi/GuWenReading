@@ -1648,6 +1648,89 @@ class KnowledgeService {
     return id;
   }
 
+  Future<void> setEvidenceReviewStatus({
+    required String targetType,
+    required String evidenceId,
+    required String status,
+  }) async {
+    final table = targetType == 'relation'
+        ? 'relation_sources'
+        : 'event_sources';
+    await store.db.transaction((txn) async {
+      final before = await txn.query(
+        table,
+        where: 'id = ?',
+        whereArgs: [evidenceId],
+        limit: 1,
+      );
+      if (before.isEmpty) return;
+      await txn.update(
+        table,
+        {'review_status': status},
+        where: 'id = ?',
+        whereArgs: [evidenceId],
+      );
+      await _audit(
+        txn,
+        targetType: '${targetType}_evidence',
+        targetId: evidenceId,
+        action: 'review_$status',
+        before: before.first,
+        after: {'review_status': status},
+      );
+    });
+  }
+
+  Future<List<Map<String, Object?>>> evidenceHistory(
+    String targetType,
+    String evidenceId,
+  ) {
+    return reviewHistory(
+      targetType: '${targetType}_evidence',
+      targetId: evidenceId,
+    );
+  }
+
+  Future<Map<String, Object?>?> evidenceContext({
+    required String bookId,
+    String? chapterId,
+    String? sentenceId,
+    String? paragraphId,
+  }) async {
+    if (chapterId == null) return null;
+    final content = await store.chapterContent(chapterId);
+    if (content == null) return null;
+    for (var p = 0; p < content.paragraphs.length; p++) {
+      final paragraph = content.paragraphs[p];
+      final index = paragraph.sentences.indexWhere(
+        (sentence) => sentence.id == sentenceId,
+      );
+      final paragraphMatch = paragraphId != null && paragraphId == paragraph.id;
+      if (index < 0 && !paragraphMatch) continue;
+      final before = <String>[];
+      for (var i = index - 2; i < index; i++) {
+        if (i >= 0) before.add(paragraph.sentences[i].originalText);
+      }
+      final after = <String>[];
+      for (var i = index + 1; i <= index + 2; i++) {
+        if (i < paragraph.sentences.length) {
+          after.add(paragraph.sentences[i].originalText);
+        }
+      }
+      return {
+        'book_id': bookId,
+        'chapter_id': chapterId,
+        'chapter_title': content.chapterTitle,
+        'paragraph_index': p + 1,
+        'sentence_index': index >= 0 ? index + 1 : null,
+        'quote': paragraph.originalText,
+        'before': before.join(),
+        'after': after.join(),
+      };
+    }
+    return null;
+  }
+
   Future<void> deleteRelation(String id) async {
     await store.db.transaction((txn) async {
       final before = await txn.query(

@@ -258,15 +258,56 @@ class _EventEditorDialogState extends ConsumerState<EventEditorDialog> {
                       row['source_kind'] == 'manual' ? '人工' : 'AI',
                     ].where((item) => item.isNotEmpty).join(' · '),
                   ),
-                  trailing: IconButton(
-                    tooltip: '删除证据',
-                    icon: const Icon(Icons.delete_outline, size: 18),
-                    onPressed: () async {
-                      await ref
-                          .read(knowledgeServiceProvider)
-                          .deleteEventEvidence(row['id'] as String);
-                      await _loadEvidence();
-                    },
+                  trailing: Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Text(
+                        evidenceStatusLabel(
+                          '${row['review_status'] ?? 'pending'}',
+                        ),
+                        style: theme.textTheme.labelSmall,
+                      ),
+                      IconButton(
+                        tooltip: '查看上下文',
+                        icon: const Icon(Icons.article_outlined, size: 18),
+                        onPressed: () => showEvidenceContext(
+                          context,
+                          ref,
+                          row,
+                          targetType: 'event',
+                          targetId: widget.event.id,
+                        ),
+                      ),
+                      PopupMenuButton<String>(
+                        onSelected: (value) async {
+                          if (value == '__delete') {
+                            await ref
+                                .read(knowledgeServiceProvider)
+                                .deleteEventEvidence(row['id'] as String);
+                          } else {
+                            await ref
+                                .read(knowledgeServiceProvider)
+                                .setEvidenceReviewStatus(
+                                  targetType: 'event',
+                                  evidenceId: row['id'] as String,
+                                  status: value,
+                                );
+                          }
+                          await _loadEvidence();
+                        },
+                        itemBuilder: (context) => const [
+                          PopupMenuItem(
+                            value: 'confirmed',
+                            child: Text('确认证据'),
+                          ),
+                          PopupMenuItem(value: 'rejected', child: Text('驳回证据')),
+                          PopupMenuItem(value: 'disputed', child: Text('标记争议')),
+                          PopupMenuItem(value: 'pending', child: Text('恢复待审')),
+                          PopupMenuDivider(),
+                          PopupMenuItem(value: '__delete', child: Text('删除证据')),
+                        ],
+                      ),
+                    ],
                   ),
                 ),
           ],

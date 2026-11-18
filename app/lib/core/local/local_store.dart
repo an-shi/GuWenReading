@@ -991,6 +991,7 @@ class LocalStore {
     cacheWriteTokens: row['cache_write_tokens'] as int? ?? 0,
     cost: (row['cost'] as num? ?? 0).toDouble(),
     requests: row['requests'] as int? ?? 0,
+    estimatedUsage: row['estimated_usage'] as int? ?? 0,
   );
 
   Future<void> cancelTask(String id) async {
@@ -1030,6 +1031,7 @@ class LocalStore {
     String? error,
     int retryCount = 0,
     bool isEstimated = false,
+    String tokenSource = 'provider_actual',
   }) async {
     final now = nowIso();
     final totalTokens =
@@ -1053,6 +1055,7 @@ class LocalStore {
         'status': status,
         'retry_count': retryCount,
         'is_estimated': isEstimated ? 1 : 0,
+        'token_source': tokenSource,
         'error': error,
         'created_at': now,
       });
@@ -1066,6 +1069,7 @@ class LocalStore {
             cache_write_tokens = cache_write_tokens + ?,
             cost = cost + ?,
             requests = requests + 1,
+            estimated_usage = estimated_usage + ?,
             updated_at = ?
           WHERE id = ?
           ''',
@@ -1075,6 +1079,7 @@ class LocalStore {
             cacheReadTokens,
             cacheWriteTokens,
             cost,
+            isEstimated ? 1 : 0,
             now,
             taskId,
           ],
@@ -1092,7 +1097,8 @@ class LocalStore {
         COALESCE(SUM(output_tokens), 0) AS output_tokens,
         COALESCE(SUM(cache_read_tokens), 0) AS cache_read_tokens,
         COALESCE(SUM(cache_write_tokens), 0) AS cache_write_tokens,
-        COALESCE(SUM(cost), 0) AS cost
+        COALESCE(SUM(cost), 0) AS cost,
+        COALESCE(SUM(is_estimated), 0) AS estimated_requests
       FROM ai_usage
       ''');
     final typeRows = await db.rawQuery('''
@@ -1121,6 +1127,7 @@ class LocalStore {
       cacheReadTokens: total['cache_read_tokens'] as int? ?? 0,
       cacheWriteTokens: total['cache_write_tokens'] as int? ?? 0,
       cost: (total['cost'] as num? ?? 0).toDouble(),
+      estimatedRequests: total['estimated_requests'] as int? ?? 0,
       byType: typeRows.map(_usageGroupFromRow).toList(),
       byModel: modelRows.map(_usageGroupFromRow).toList(),
     );
@@ -1320,6 +1327,7 @@ class LocalStore {
         'output_price': model.outputPrice,
         'cache_read_price': model.cacheReadPrice,
         'cache_write_price': model.cacheWritePrice,
+        'tokenizer': model.tokenizer,
         'enabled': model.enabled ? 1 : 0,
         'created_at': now,
         'updated_at': now,

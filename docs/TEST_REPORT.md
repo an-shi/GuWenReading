@@ -20,7 +20,7 @@ cd app
 flutter test
 ```
 
-结果：`11 tests passed`
+结果：`16 tests passed`
 
 覆盖：
 
@@ -33,6 +33,7 @@ flutter test
 - 阅读模式映射与章节内容序列化。
 - 移动端/桌面端应用壳启动：底部导航与 NavigationRail。
 - AI 联合抽取、Token/费用计量、翻译短 ID 与批次缓存、逐句翻译缓存、任务去重、长章节分块、事件证据合并、章节重复抽取跳过、单次任务预算暂停（Mock OpenAI 兼容服务）。
+- Tokenizer Adapter：模型系列识别、配置覆盖、本地 Tokenizer 注册、CJK/Latin 估算和 Token 来源标记。
 
 ### Android 构建
 

@@ -324,13 +324,16 @@ class AppDatabase {
         'cache_write_tokens': 'INTEGER NOT NULL DEFAULT 0',
         'cost': 'REAL NOT NULL DEFAULT 0',
         'requests': 'INTEGER NOT NULL DEFAULT 0',
+        'estimated_usage': 'INTEGER NOT NULL DEFAULT 0',
       },
+      'ai_usage': {'token_source': "TEXT NOT NULL DEFAULT 'provider_actual'"},
       'ai_models': {
         'is_default_extraction': 'INTEGER NOT NULL DEFAULT 0',
         'input_price': 'REAL NOT NULL DEFAULT 0',
         'output_price': 'REAL NOT NULL DEFAULT 0',
         'cache_read_price': 'REAL NOT NULL DEFAULT 0',
         'cache_write_price': 'REAL NOT NULL DEFAULT 0',
+        'tokenizer': 'TEXT',
       },
       'historical_events': {'fingerprint': 'TEXT'},
     };

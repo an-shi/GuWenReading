@@ -282,6 +282,7 @@ const List<String> schemaStatements = [
     cache_write_tokens INTEGER NOT NULL DEFAULT 0,
     cost REAL NOT NULL DEFAULT 0,
     requests INTEGER NOT NULL DEFAULT 0,
+    estimated_usage INTEGER NOT NULL DEFAULT 0,
     error TEXT,
     result TEXT NOT NULL DEFAULT '{}',
     created_at TEXT NOT NULL,
@@ -319,6 +320,7 @@ const List<String> schemaStatements = [
     output_price REAL NOT NULL DEFAULT 0,
     cache_read_price REAL NOT NULL DEFAULT 0,
     cache_write_price REAL NOT NULL DEFAULT 0,
+    tokenizer TEXT,
     enabled INTEGER NOT NULL DEFAULT 1,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
@@ -386,6 +388,7 @@ const List<String> schemaStatements = [
     status TEXT NOT NULL DEFAULT 'success',
     retry_count INTEGER NOT NULL DEFAULT 0,
     is_estimated INTEGER NOT NULL DEFAULT 0,
+    token_source TEXT NOT NULL DEFAULT 'provider_actual',
     error TEXT,
     created_at TEXT NOT NULL
   )

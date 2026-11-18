@@ -476,9 +476,28 @@ cache_read_price, cache_write_price
 
 ## 7. 已知限制与后续优化
 
-### 7.1 精确 Tokenizer
+### 7.1 Tokenizer
 
-当前只在 Provider 返回 usage 时使用真实 Token；分块预算和无 usage 的计量使用保守估算。后续可按模型配置 tokenizer 或接入 Provider token count 接口。
+当前已建立 `tokenizer_adapter.dart`：
+
+- 业务层只依赖 `TokenizerAdapter` / `TokenizerRegistry`，不直接处理模型细节。
+- 可按模型名识别 OpenAI、Anthropic、Gemini、Qwen、DeepSeek 等系列，分别使用不同的 CJK/Latin/数字/标点比例。
+- 模型可配置 `tokenizer` 字段覆盖启发式；也可通过 `TokenizerRegistry.register` 注入真正的本地 Tokenizer。
+- 未注册精确词表时，所有结果标记为 `local_estimate`，不会伪装成 Provider 真实用量。
+- Provider 返回 usage 时，`ai_usage.token_source = provider_actual`；本地估算时记录实际 adapter 名称。
+- 翻译批次和知识分块使用同一 Tokenizer 做发送前预算。
+
+当前项目没有内置各厂商 BPE 词表，因此默认仍是保守估算；接入真实词表后无需修改业务代码。
+
+### 7.1.1 Token 来源标记
+
+`ai_usage.token_source` 取值：
+
+- `provider_actual`：Provider 返回的 usage。
+- `local_tokenizer`：已注册的本地 Tokenizer。
+- `local_estimate`：模型系列启发式估算。
+
+任务表 `estimated_usage` 统计含估算请求的次数，任务中心会单独标注。
 
 ### 7.2 Prompt Caching
 
@@ -531,7 +550,9 @@ cache_read_price, cache_write_price
 - [x] 事件指纹去重
 - [x] 单次任务预算暂停
 - [x] 知识抽取模型/问答模型回退
-- [ ] 精确 tokenizer 和 token count API
+- [x] 模型级 Tokenizer Adapter 与来源标记（provider_actual/local_tokenizer/local_estimate）
+- [x] 翻译批次与知识分块统一使用 Tokenizer 预算
+- [ ] 内置各厂商精确 BPE 词表
 - [ ] Provider 原生 Prompt Caching
 - [ ] Batch API
 - [ ] 单章节/单本书预算

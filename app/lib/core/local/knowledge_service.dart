@@ -10,6 +10,7 @@ import 'ai_service.dart';
 import 'app_database.dart';
 import 'local_models.dart';
 import 'local_store.dart';
+import 'tokenizer_adapter.dart';
 
 class KnowledgeService {
   KnowledgeService({
@@ -233,6 +234,7 @@ class KnowledgeService {
     AiModelRecord model,
   ) {
     final budget = _chunkTokenBudget(model);
+    final tokenizer = TokenizerRegistry.forModel(model);
     final chunks = <_KnowledgeChunk>[];
     var current = <Sentence>[];
     var tokens = 0;
@@ -253,14 +255,16 @@ class KnowledgeService {
     for (final paragraph in content.paragraphs) {
       final paragraphTokens = paragraph.sentences.fold<int>(
         0,
-        (sum, sentence) => sum + estimateTokens(sentence.originalText) + 4,
+        (sum, sentence) =>
+            sum + tokenizer.count(sentence.originalText).tokens + 8,
       );
       if (current.isNotEmpty && tokens + paragraphTokens > budget) {
         flush();
       }
       if (paragraphTokens > budget) {
         for (final sentence in paragraph.sentences) {
-          final sentenceTokens = estimateTokens(sentence.originalText) + 4;
+          final sentenceTokens =
+              tokenizer.count(sentence.originalText).tokens + 8;
           if (current.isNotEmpty && tokens + sentenceTokens > budget) {
             flush();
           }

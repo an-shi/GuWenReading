@@ -767,6 +767,7 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
     final cacheWritePrice = TextEditingController(
       text: '${model?.cacheWritePrice ?? 0}',
     );
+    final tokenizer = TextEditingController(text: model?.tokenizer ?? '');
     var selectedProvider = providerId;
     var supportsJson = model?.supportsJson ?? true;
     var defaultTranslation = model?.isDefaultTranslation ?? false;
@@ -811,6 +812,25 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
                 TextField(
                   controller: displayName,
                   decoration: const InputDecoration(labelText: '显示名称'),
+                ),
+                const SizedBox(height: 10),
+                TextField(
+                  controller: tokenizer,
+                  decoration: const InputDecoration(
+                    labelText: 'Tokenizer（可选）',
+                    hintText: 'cl100k_base / o200k_base / qwen / deepseek / anthropic',
+                  ),
+                ),
+                Padding(
+                  padding: const EdgeInsets.only(top: 4),
+                  child: Text(
+                    '未安装精确词表时按模型系列保守估算；Token 来源会在用量记录中标记。',
+                    style: theme.textTheme.bodySmall?.copyWith(
+                      color: theme.colorScheme.onSurface.withValues(
+                        alpha: 0.45,
+                      ),
+                    ),
+                  ),
                 ),
                 const SizedBox(height: 10),
                 Row(
@@ -1009,6 +1029,7 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
       outputPrice: double.tryParse(outputPrice.text.trim()) ?? 0,
       cacheReadPrice: double.tryParse(cacheReadPrice.text.trim()) ?? 0,
       cacheWritePrice: double.tryParse(cacheWritePrice.text.trim()) ?? 0,
+      tokenizer: tokenizer.text.trim().isEmpty ? null : tokenizer.text.trim(),
       capabilities: capabilities,
       supportsJson: supportsJson,
       isDefaultTranslation: defaultTranslation,

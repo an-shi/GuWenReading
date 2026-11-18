@@ -484,6 +484,7 @@ class TaskInfo {
     this.cacheWriteTokens = 0,
     this.cost = 0,
     this.requests = 0,
+    this.estimatedUsage = 0,
   });
 
   final String id;
@@ -504,6 +505,7 @@ class TaskInfo {
   final int cacheWriteTokens;
   final double cost;
   final int requests;
+  final int estimatedUsage;
 
   bool get isActive =>
       status == 'queued' || status == 'running' || status == 'paused';
@@ -529,6 +531,7 @@ class TaskInfo {
     cacheWriteTokens: _int(json['cache_write_tokens']),
     cost: _double(json['cost']),
     requests: _int(json['requests']),
+    estimatedUsage: _int(json['estimated_usage']),
   );
 }
 

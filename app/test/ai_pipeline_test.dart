@@ -165,6 +165,10 @@ void main() {
       expect(translated.inputTokens, greaterThan(0));
       expect(translated.outputTokens, greaterThan(0));
       expect(translated.cost, greaterThan(0));
+      expect(translated.estimatedUsage, 0);
+      final usageRows = await store.db.query('ai_usage', limit: 1);
+      expect(usageRows.first['token_source'], 'provider_actual');
+      expect(usageRows.first['is_estimated'], 0);
       final translatedCount = await store.db.rawQuery(
         'SELECT COUNT(*) AS n FROM translations',
       );

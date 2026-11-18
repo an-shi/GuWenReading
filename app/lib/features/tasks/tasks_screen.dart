@@ -215,6 +215,7 @@ class _UsageSummaryCard extends StatelessWidget {
         title: Text('AI 用量', style: theme.textTheme.titleSmall),
         subtitle: Text(
           '${_formatInt(data.requests)} 次调用 · 累计费用 ${_formatCost(data.cost)}'
+          '${data.estimatedRequests > 0 ? ' · ${_formatInt(data.estimatedRequests)} 次为估算' : ''}'
           '${data.cost == 0 && data.requests > 0 ? '（未配置模型单价）' : ''}',
           style: theme.textTheme.labelSmall?.copyWith(
             color: theme.colorScheme.onSurface.withValues(alpha: 0.5),
@@ -584,6 +585,14 @@ class _TaskCard extends StatelessWidget {
                         color: theme.colorScheme.onSurface.withValues(
                           alpha: 0.46,
                         ),
+                      ),
+                    ),
+                  if (task.estimatedUsage > 0)
+                    Text(
+                      '估算 ${task.estimatedUsage} 次',
+                      style: theme.textTheme.labelSmall?.copyWith(
+                        fontSize: 9.5,
+                        color: theme.colorScheme.tertiary,
                       ),
                     ),
                   Text(

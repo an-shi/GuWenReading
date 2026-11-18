@@ -10,6 +10,7 @@ import '../../data/models.dart';
 import 'ai_service.dart';
 import 'local_models.dart';
 import 'local_store.dart';
+import 'tokenizer_adapter.dart';
 
 class TranslationService {
   TranslationService({
@@ -140,7 +141,8 @@ class TranslationService {
       failedCount: failed,
     );
 
-    final batchChars = _batchCharBudget(resolved.model);
+    final tokenizer = TokenizerRegistry.forModel(resolved.model);
+    final batchTokens = _batchTokenBudget(resolved.model);
     var batchStart = 0;
     while (batchStart < pending.length) {
       final task = await store.getTask(taskId);
@@ -150,12 +152,12 @@ class TranslationService {
         return;
       }
       final batch = <Sentence>[];
-      var chars = 0;
+      var tokens = 0;
       while (batchStart < pending.length &&
-          (chars < batchChars || batch.isEmpty)) {
+          (tokens < batchTokens || batch.isEmpty)) {
         final sentence = pending[batchStart];
         batch.add(sentence);
-        chars += sentence.originalText.length;
+        tokens += tokenizer.count(sentence.originalText).tokens + 6;
         batchStart += 1;
       }
       try {
@@ -373,12 +375,17 @@ class TranslationService {
     return true;
   }
 
-  int _batchCharBudget(AiModelRecord model) {
-    final outputBound = math.max(400, (model.maxOutputTokens * 0.75).round());
+  /// Token budget for one translation batch, excluding the fixed prompt.
+  ///
+  /// 20% headroom is kept for the system prompt, book/chapter metadata and
+  /// context sentences. Output size is bounded by 75% of max output so a
+  /// response cannot be truncated by the provider.
+  int _batchTokenBudget(AiModelRecord model) {
     final inputBound = math.max(
-      600,
-      model.contextWindow - model.maxOutputTokens - 1200,
+      400,
+      ((model.contextWindow - model.maxOutputTokens - 500) * 0.8).round(),
     );
+    final outputBound = math.max(400, (model.maxOutputTokens * 0.75).round());
     return math.max(400, math.min(6000, math.min(outputBound, inputBound)));
   }
 

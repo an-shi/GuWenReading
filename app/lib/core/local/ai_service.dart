@@ -1,5 +1,4 @@
 import 'dart:convert';
-import 'dart:math' as math;
 
 import 'package:collection/collection.dart';
 import 'package:dio/dio.dart';
@@ -9,6 +8,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'local_models.dart';
 import 'local_store.dart';
 import 'prompt_defaults.dart';
+import 'tokenizer_adapter.dart';
 
 class AiNotConfiguredException implements Exception {
   AiNotConfiguredException([this.message = '尚未配置 AI 模型，请先在设置中添加服务商和模型']);
@@ -42,21 +42,14 @@ class RemoteAiModel {
   final String? description;
 }
 
-/// Conservative token estimator used only when a provider does not return
-/// usage. CJK characters count as one token; other text is approximated at
-/// four characters per token.
+/// Conservative token estimator kept for callers without a model context.
+/// Model-aware code should use `TokenizerRegistry.forModel`.
 int estimateTokens(String text) {
-  if (text.isEmpty) return 0;
-  var cjk = 0;
-  var other = 0;
-  for (final rune in text.runes) {
-    if (_isCjkRune(rune)) {
-      cjk += 1;
-    } else {
-      other += 1;
-    }
-  }
-  return math.max(1, cjk + (other / 4).ceil());
+  return const HeuristicTokenizerAdapter(
+    name: 'generic-heuristic',
+    cjkWeight: 1,
+    asciiCharsPerToken: 4,
+  ).count(text).tokens;
 }
 
 /// Reads the optional per-task cost cap from shared settings.
@@ -69,12 +62,6 @@ Future<double> readAiTaskBudget() async {
     return 0;
   }
 }
-
-bool _isCjkRune(int rune) =>
-    (rune >= 0x3400 && rune <= 0x9FFF) ||
-    (rune >= 0xF900 && rune <= 0xFAFF) ||
-    (rune >= 0x20000 && rune <= 0x2FA1F) ||
-    (rune >= 0x3000 && rune <= 0x303F);
 
 class _ProviderUsage {
   const _ProviderUsage({
@@ -958,9 +945,16 @@ class AiJsonClient {
     required String? error,
     required int retryCount,
   }) async {
+    final tokenizer = TokenizerRegistry.forModel(resolved.model);
     final estimated = reported == null;
-    final input = reported?.inputTokens ?? estimateTokens(prompt);
-    final output = reported?.outputTokens ?? estimateTokens(responseText);
+    final inputTokens = reported?.inputTokens ?? tokenizer.count(prompt).tokens;
+    final outputTokens =
+        reported?.outputTokens ?? tokenizer.count(responseText).tokens;
+    final input = inputTokens;
+    final output = outputTokens;
+    final tokenSource = estimated
+        ? tokenizer.source.wireValue
+        : TokenCountSource.providerActual.wireValue;
     final cacheRead = reported?.cacheReadTokens ?? 0;
     final cacheWrite = reported?.cacheWriteTokens ?? 0;
     final cost = _estimateCost(
@@ -987,6 +981,7 @@ class AiJsonClient {
       error: error,
       retryCount: retryCount,
       isEstimated: estimated,
+      tokenSource: tokenSource,
     );
   }
 

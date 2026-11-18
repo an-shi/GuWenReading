@@ -49,6 +49,7 @@ class AiModelRecord {
     this.outputPrice = 0,
     this.cacheReadPrice = 0,
     this.cacheWritePrice = 0,
+    this.tokenizer,
     this.enabled = true,
   });
 
@@ -71,6 +72,11 @@ class AiModelRecord {
   final double outputPrice;
   final double cacheReadPrice;
   final double cacheWritePrice;
+
+  /// Optional tokenizer family override, e.g. `cl100k_base`, `o200k_base`,
+  /// `qwen`, `deepseek`, `anthropic`, `gemini`. Unknown values fall back to
+  /// the model-name heuristic.
+  final String? tokenizer;
   final bool enabled;
 
   bool supports(String capability) => capabilities.contains(capability);
@@ -92,6 +98,7 @@ class AiModelRecord {
     outputPrice: (row['output_price'] as num? ?? 0).toDouble(),
     cacheReadPrice: (row['cache_read_price'] as num? ?? 0).toDouble(),
     cacheWritePrice: (row['cache_write_price'] as num? ?? 0).toDouble(),
+    tokenizer: row['tokenizer'] as String?,
     enabled: (row['enabled'] as int? ?? 1) == 1,
   );
 }
@@ -284,6 +291,7 @@ class AiUsageRecord {
     required this.status,
     required this.isEstimated,
     required this.createdAt,
+    this.tokenSource = 'provider_actual',
     this.taskId,
     this.providerId,
     this.providerName,
@@ -310,6 +318,7 @@ class AiUsageRecord {
   final String status;
   final int retryCount;
   final bool isEstimated;
+  final String tokenSource;
   final String? error;
   final String createdAt;
 
@@ -331,6 +340,7 @@ class AiUsageRecord {
     status: row['status'] as String? ?? 'success',
     retryCount: row['retry_count'] as int? ?? 0,
     isEstimated: (row['is_estimated'] as int? ?? 0) == 1,
+    tokenSource: row['token_source'] as String? ?? 'provider_actual',
     error: row['error'] as String?,
     createdAt: row['created_at'] as String? ?? '',
   );
@@ -364,6 +374,7 @@ class AiUsageSummary {
     this.cacheReadTokens = 0,
     this.cacheWriteTokens = 0,
     this.cost = 0,
+    this.estimatedRequests = 0,
     this.byType = const [],
     this.byModel = const [],
   });
@@ -374,6 +385,7 @@ class AiUsageSummary {
   final int cacheReadTokens;
   final int cacheWriteTokens;
   final double cost;
+  final int estimatedRequests;
   final List<AiUsageGroup> byType;
   final List<AiUsageGroup> byModel;
 }

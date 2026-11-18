@@ -63,7 +63,6 @@
 - 单章节、单本书级别的独立预算（目前是单次任务预算）。
 - 自动在应用重启后无人工点击恢复任务。
 - AI 参与的多候选实体消歧。
-- 供应商连接测试调用的用量统计。
 - 按实体/关系/事件分别路由不同模型；当前联合抽取使用一个“知识抽取模型”。
 
 ## 1. 翻译调用链
@@ -388,7 +387,16 @@ cache_read_price, cache_write_price
   ÷ 1,000,000
 ```
 
-### 3.4 UI
+### 3.4 连接测试计量
+
+`AiSettingsService.testProvider` 也走统一计量：
+
+- 任务类型为 `connection_test`，不归属任何业务任务。
+- 成功和失败都会写入 `ai_usage`；失败请求如果 Provider 已计费，同样记录 Token 和费用。
+- 任务中心“按任务类型”中单独显示“连接测试”，与正式翻译/知识抽取费用分开。
+- 没有 usage 时标记为估算，来源写入 `token_source`。
+
+### 3.5 UI
 
 任务中心顶部“AI 用量”：
 
@@ -549,6 +557,7 @@ cache_read_price, cache_write_price
 - [x] 实体复用、关系证据合并
 - [x] 事件指纹去重
 - [x] 单次任务预算暂停
+- [x] 连接测试用量与费用统计
 - [x] 知识抽取模型/问答模型回退
 - [x] 模型级 Tokenizer Adapter 与来源标记（provider_actual/local_tokenizer/local_estimate）
 - [x] 翻译批次与知识分块统一使用 Tokenizer 预算

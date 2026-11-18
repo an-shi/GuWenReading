@@ -34,6 +34,7 @@ flutter test
 - 移动端/桌面端应用壳启动：底部导航与 NavigationRail。
 - AI 联合抽取、Token/费用计量、翻译短 ID 与批次缓存、逐句翻译缓存、任务去重、长章节分块、事件证据合并、章节重复抽取跳过、单次任务预算暂停（Mock OpenAI 兼容服务）。
 - Tokenizer Adapter：模型系列识别、配置覆盖、本地 Tokenizer 注册、CJK/Latin 估算和 Token 来源标记。
+- 连接测试计量：成功和失败都写入 `ai_usage`，按 `connection_test` 单独统计。
 
 ### Android 构建
 

@@ -20,6 +20,7 @@ void main() {
       var translationRequests = 0;
       var knowledgeRequests = 0;
       var failKnowledgeAt = -1;
+      var failConnectionTest = false;
       server.listen((request) async {
         final body = await utf8.decoder.bind(request).join();
         final payload = jsonDecode(body) as Map<String, dynamic>;
@@ -27,6 +28,16 @@ void main() {
         final content = messages.isEmpty
             ? ''
             : '${(messages.first as Map)['content'] ?? ''}';
+        if (content.contains('连接成功') && failConnectionTest) {
+          request.response.statusCode = 503;
+          request.response.write(
+            jsonEncode({
+              'error': {'message': 'mock connection failure'},
+            }),
+          );
+          await request.response.close();
+          return;
+        }
         Map<String, dynamic> result;
         if (content.contains('"entities"') || content.contains('实体类型')) {
           knowledgeRequests += 1;
@@ -166,7 +177,12 @@ void main() {
       expect(translated.outputTokens, greaterThan(0));
       expect(translated.cost, greaterThan(0));
       expect(translated.estimatedUsage, 0);
-      final usageRows = await store.db.query('ai_usage', limit: 1);
+      final usageRows = await store.db.query(
+        'ai_usage',
+        where: 'task_type = ?',
+        whereArgs: ['translation'],
+        limit: 1,
+      );
       expect(usageRows.first['token_source'], 'provider_actual');
       expect(usageRows.first['is_estimated'], 0);
       final translatedCount = await store.db.rawQuery(
@@ -259,6 +275,41 @@ void main() {
       );
       expect(
         summary.byType.any((group) => group.label == 'knowledge_extraction'),
+        isTrue,
+      );
+
+      await ai.testProvider(
+        (await ai.providers()).first,
+        (await ai.models()).first,
+      );
+      final connectionRows = await store.db.query(
+        'ai_usage',
+        where: 'task_type = ?',
+        whereArgs: ['connection_test'],
+      );
+      expect(connectionRows, hasLength(1));
+      expect(connectionRows.first['status'], 'success');
+      expect(connectionRows.first['input_tokens'], greaterThan(0));
+
+      failConnectionTest = true;
+      await expectLater(
+        ai.testProvider(
+          (await ai.providers()).first,
+          (await ai.models()).first,
+        ),
+        throwsA(isA<AiRequestException>()),
+      );
+      final failedTests = await store.db.query(
+        'ai_usage',
+        where: 'task_type = ? AND status = ?',
+        whereArgs: ['connection_test', 'failed'],
+      );
+      expect(failedTests, hasLength(1));
+      expect(failedTests.first['error'], isNotNull);
+      failConnectionTest = false;
+      final summaryWithTest = await store.aiUsageSummary();
+      expect(
+        summaryWithTest.byType.any((group) => group.label == 'connection_test'),
         isTrue,
       );
 

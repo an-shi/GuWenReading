@@ -63,6 +63,28 @@ Future<double> readAiTaskBudget() async {
   }
 }
 
+/// Computes cost from per-million-token prices. Cache prices fall back to the
+/// input price when left at zero so cached tokens are never treated as free.
+double aiUsageCost(
+  AiModelRecord model, {
+  required int inputTokens,
+  required int outputTokens,
+  required int cacheReadTokens,
+  required int cacheWriteTokens,
+}) {
+  final cacheReadPrice = model.cacheReadPrice > 0
+      ? model.cacheReadPrice
+      : model.inputPrice;
+  final cacheWritePrice = model.cacheWritePrice > 0
+      ? model.cacheWritePrice
+      : model.inputPrice;
+  return (inputTokens * model.inputPrice +
+          outputTokens * model.outputPrice +
+          cacheReadTokens * cacheReadPrice +
+          cacheWriteTokens * cacheWritePrice) /
+      1000000;
+}
+
 class _ProviderUsage {
   const _ProviderUsage({
     required this.inputTokens,
@@ -75,6 +97,60 @@ class _ProviderUsage {
   final int outputTokens;
   final int cacheReadTokens;
   final int cacheWriteTokens;
+}
+
+_ProviderUsage? _parseProviderUsageData(Object? responseData) {
+  if (responseData is! Map) return null;
+  final rawUsage = responseData['usage'];
+  if (rawUsage is! Map) {
+    final promptEval = responseData['prompt_eval_count'];
+    final evalCount = responseData['eval_count'];
+    if (promptEval is num || evalCount is num) {
+      return _ProviderUsage(
+        inputTokens: promptEval is num ? promptEval.toInt() : 0,
+        outputTokens: evalCount is num ? evalCount.toInt() : 0,
+        cacheReadTokens: 0,
+        cacheWriteTokens: 0,
+      );
+    }
+    return null;
+  }
+  int readInt(Object? value) {
+    if (value is num) return value.toInt();
+    if (value is String) return int.tryParse(value) ?? 0;
+    return 0;
+  }
+
+  final details = rawUsage['prompt_tokens_details'];
+  final detailMap = details is Map ? details : const {};
+  final cacheRead = readInt(
+    rawUsage['cache_read_input_tokens'] ??
+        rawUsage['cached_tokens'] ??
+        detailMap['cached_tokens'],
+  );
+  final cacheWrite = readInt(
+    rawUsage['cache_creation_input_tokens'] ?? rawUsage['cache_write_tokens'],
+  );
+  final rawPrompt = readInt(
+    rawUsage['prompt_tokens'] ?? rawUsage['input_tokens'],
+  );
+  final output = readInt(
+    rawUsage['completion_tokens'] ?? rawUsage['output_tokens'],
+  );
+  // OpenAI's prompt_tokens already includes cached input, while Anthropic's
+  // input_tokens excludes cache reads/writes.
+  final promptIncludesCached =
+      rawUsage.containsKey('prompt_tokens') &&
+      !rawUsage.containsKey('cache_read_input_tokens');
+  final input = promptIncludesCached && rawPrompt >= cacheRead
+      ? rawPrompt - cacheRead
+      : rawPrompt;
+  return _ProviderUsage(
+    inputTokens: input,
+    outputTokens: output,
+    cacheReadTokens: cacheRead,
+    cacheWriteTokens: cacheWrite,
+  );
 }
 
 class AiSettingsService {
@@ -636,21 +712,103 @@ class AiSettingsService {
     if (provider.kind == 'anthropic') {
       headers['anthropic-version'] = '2023-06-01';
     }
+    const prompt = '请回答“连接成功”，只输出这四个字。';
     final body = _body(provider, model, [
-      const {'role': 'user', 'content': '请回答“连接成功”，只输出这四个字。'},
+      const {'role': 'user', 'content': prompt},
     ], jsonMode: false);
+    final stopwatch = Stopwatch()..start();
+    Object? responseData;
+    String? failure;
+    var success = false;
     try {
       final response = await client.post<dynamic>(
         url,
         data: body,
         options: Options(headers: headers),
       );
+      responseData = response.data;
       final text = _extractText(provider, response.data);
-      if (text.trim().isEmpty) throw AiRequestException('服务商返回了空响应');
+      if (text.trim().isEmpty) {
+        failure = '服务商返回了空响应';
+      } else {
+        success = true;
+      }
     } on DioException catch (error) {
-      throw AiRequestException(_dioMessage(error));
+      responseData = error.response?.data;
+      failure = _dioMessage(error);
+      throw AiRequestException(failure);
     } finally {
+      stopwatch.stop();
       client.close();
+      await _recordConnectionTest(
+        provider: provider,
+        model: model,
+        prompt: prompt,
+        responseText: responseData == null
+            ? ''
+            : _safeExtractText(provider, responseData),
+        responseData: responseData,
+        durationMs: stopwatch.elapsedMilliseconds,
+        success: success,
+        error: failure,
+      );
+    }
+    if (!success) {
+      throw AiRequestException(failure ?? '连接测试失败');
+    }
+  }
+
+  /// Records every connection test, including failures. Some providers still
+  /// bill a failed request, so cost and tokens are never discarded.
+  Future<void> _recordConnectionTest({
+    required AiProviderRecord provider,
+    required AiModelRecord model,
+    required String prompt,
+    required String responseText,
+    required Object? responseData,
+    required int durationMs,
+    required bool success,
+    required String? error,
+  }) async {
+    final reported = _parseProviderUsageData(responseData);
+    final tokenizer = TokenizerRegistry.forModel(model);
+    final input = reported?.inputTokens ?? tokenizer.count(prompt).tokens;
+    final output =
+        reported?.outputTokens ?? tokenizer.count(responseText).tokens;
+    final cacheRead = reported?.cacheReadTokens ?? 0;
+    final cacheWrite = reported?.cacheWriteTokens ?? 0;
+    await store.recordAiUsage(
+      taskType: 'connection_test',
+      providerId: provider.id,
+      providerName: provider.name,
+      modelId: model.id,
+      modelName: model.displayName,
+      inputTokens: input,
+      outputTokens: output,
+      cacheReadTokens: cacheRead,
+      cacheWriteTokens: cacheWrite,
+      cost: aiUsageCost(
+        model,
+        inputTokens: input,
+        outputTokens: output,
+        cacheReadTokens: cacheRead,
+        cacheWriteTokens: cacheWrite,
+      ),
+      durationMs: durationMs,
+      status: success ? 'success' : 'failed',
+      error: error,
+      isEstimated: reported == null,
+      tokenSource: reported == null
+          ? tokenizer.source.wireValue
+          : TokenCountSource.providerActual.wireValue,
+    );
+  }
+
+  String _safeExtractText(AiProviderRecord provider, Object? data) {
+    try {
+      return _extractText(provider, data);
+    } catch (_) {
+      return '';
     }
   }
 
@@ -879,59 +1037,8 @@ class AiJsonClient {
     return parseJsonObject(text);
   }
 
-  _ProviderUsage? _parseProviderUsage({dynamic responseData}) {
-    if (responseData is! Map) return null;
-    final rawUsage = responseData['usage'];
-    if (rawUsage is! Map) {
-      final promptEval = responseData['prompt_eval_count'];
-      final evalCount = responseData['eval_count'];
-      if (promptEval is num || evalCount is num) {
-        return _ProviderUsage(
-          inputTokens: promptEval is num ? promptEval.toInt() : 0,
-          outputTokens: evalCount is num ? evalCount.toInt() : 0,
-          cacheReadTokens: 0,
-          cacheWriteTokens: 0,
-        );
-      }
-      return null;
-    }
-    int readInt(Object? value) {
-      if (value is num) return value.toInt();
-      if (value is String) return int.tryParse(value) ?? 0;
-      return 0;
-    }
-
-    final details = rawUsage['prompt_tokens_details'];
-    final detailMap = details is Map ? details : const {};
-    final cacheRead = readInt(
-      rawUsage['cache_read_input_tokens'] ??
-          rawUsage['cached_tokens'] ??
-          detailMap['cached_tokens'],
-    );
-    final cacheWrite = readInt(
-      rawUsage['cache_creation_input_tokens'] ?? rawUsage['cache_write_tokens'],
-    );
-    final rawPrompt = readInt(
-      rawUsage['prompt_tokens'] ?? rawUsage['input_tokens'],
-    );
-    final output = readInt(
-      rawUsage['completion_tokens'] ?? rawUsage['output_tokens'],
-    );
-    // OpenAI's prompt_tokens already includes cached input, while Anthropic's
-    // input_tokens excludes cache reads/writes.
-    final promptIncludesCached =
-        rawUsage.containsKey('prompt_tokens') &&
-        !rawUsage.containsKey('cache_read_input_tokens');
-    final input = promptIncludesCached && rawPrompt >= cacheRead
-        ? rawPrompt - cacheRead
-        : rawPrompt;
-    return _ProviderUsage(
-      inputTokens: input,
-      outputTokens: output,
-      cacheReadTokens: cacheRead,
-      cacheWriteTokens: cacheWrite,
-    );
-  }
+  _ProviderUsage? _parseProviderUsage({dynamic responseData}) =>
+      _parseProviderUsageData(responseData);
 
   Future<void> _recordUsage({
     required ResolvedAiModel resolved,
@@ -957,7 +1064,7 @@ class AiJsonClient {
         : TokenCountSource.providerActual.wireValue;
     final cacheRead = reported?.cacheReadTokens ?? 0;
     final cacheWrite = reported?.cacheWriteTokens ?? 0;
-    final cost = _estimateCost(
+    final cost = aiUsageCost(
       resolved.model,
       inputTokens: input,
       outputTokens: output,
@@ -983,26 +1090,6 @@ class AiJsonClient {
       isEstimated: estimated,
       tokenSource: tokenSource,
     );
-  }
-
-  double _estimateCost(
-    AiModelRecord model, {
-    required int inputTokens,
-    required int outputTokens,
-    required int cacheReadTokens,
-    required int cacheWriteTokens,
-  }) {
-    final cacheReadPrice = model.cacheReadPrice > 0
-        ? model.cacheReadPrice
-        : model.inputPrice;
-    final cacheWritePrice = model.cacheWritePrice > 0
-        ? model.cacheWritePrice
-        : model.inputPrice;
-    return (inputTokens * model.inputPrice +
-            outputTokens * model.outputPrice +
-            cacheReadTokens * cacheReadPrice +
-            cacheWriteTokens * cacheWritePrice) /
-        1000000;
   }
 
   String _endpoint(ResolvedAiModel resolved) {

@@ -356,6 +356,9 @@ String _taskTypeLabel(String type) => switch (type) {
   'entity_extraction' => '实体抽取',
   'relation_extraction' => '关系抽取',
   'event_extraction' => '事件抽取',
+  'connection_test' => '连接测试',
+  'disambiguation' => '实体消歧',
+  'quality_check' => '质量检查',
   _ => '其他',
 };
 

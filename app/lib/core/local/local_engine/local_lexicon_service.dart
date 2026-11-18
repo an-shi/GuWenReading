@@ -13,13 +13,29 @@ class LocalLexiconService {
     final rows = await store.db.query(
       'local_lexicon_entries',
       where: "status <> 'deleted'",
-      orderBy: 'is_custom DESC, word ASC',
+      orderBy: 'is_custom ASC, word ASC',
     );
-    return rows
-        .map(
-          (row) => {...row, 'meanings': jsonDecode('${row['meanings_json']}')},
-        )
-        .toList();
+    final effective = <String, Map<String, Object?>>{};
+    for (final row in rows) {
+      final word = '${row['word']}';
+      final existing = effective[word];
+      if (existing == null || row['is_custom'] == 1) {
+        effective[word] = {
+          ...row,
+          'meanings': jsonDecode('${row['meanings_json']}'),
+        };
+      }
+    }
+    final result = effective.values.toList()
+      ..sort((a, b) {
+        final customCompare = (b['is_custom'] as int? ?? 0).compareTo(
+          a['is_custom'] as int? ?? 0,
+        );
+        return customCompare != 0
+            ? customCompare
+            : '${a['word']}'.compareTo('${b['word']}');
+      });
+    return result;
   }
 
   Future<void> upsert({
@@ -45,30 +61,14 @@ class LocalLexiconService {
       'created_at': now,
       'updated_at': now,
     }, conflictAlgorithm: ConflictAlgorithm.replace);
-    localCustomLexicon[word] = LexiconEntry(
-      word: word,
-      kind: kind,
-      meanings: meanings.map((item) => LexiconMeaning(item)).toList(),
-      source: source ?? '用户自定义',
-      confidence: confidence,
-    );
   }
 
   Future<void> remove(String id) async {
-    final rows = await store.db.query(
-      'local_lexicon_entries',
-      where: 'id = ?',
-      whereArgs: [id],
-      limit: 1,
-    );
     await store.db.delete(
       'local_lexicon_entries',
       where: 'id = ?',
       whereArgs: [id],
     );
-    if (rows.isNotEmpty) {
-      localCustomLexicon.remove('${rows.first['word']}');
-    }
   }
 
   Future<String> exportJson() async {
@@ -92,27 +92,61 @@ class LocalLexiconService {
   }
 
   Future<void> loadCustom() async {
+    await seedBuiltin();
+  }
+
+  Future<void> seedBuiltin() async {
+    final seeded = await store.getSetting('local_lexicon_seed_version');
+    if (seeded == lexiconVersion) return;
+    final now = DateTime.now().toUtc().toIso8601String();
+    await store.db.transaction((txn) async {
+      for (final entry in builtinLexicon.values) {
+        await txn.insert('local_lexicon_entries', {
+          'id': 'lex-builtin-${entry.word}',
+          'word': entry.word,
+          'kind': entry.kind,
+          'meanings_json': jsonEncode(
+            entry.meanings.map((meaning) => meaning.modern).toList(),
+          ),
+          'source': entry.source,
+          'version': lexiconVersion,
+          'confidence': entry.confidence,
+          'is_custom': 0,
+          'status': 'active',
+          'created_at': now,
+          'updated_at': now,
+        }, conflictAlgorithm: ConflictAlgorithm.ignore);
+      }
+    });
+    await store.setSetting('local_lexicon_seed_version', lexiconVersion);
+  }
+
+  Future<Map<String, LexiconEntry>> effectiveLexicon() async {
+    await seedBuiltin();
     final rows = await store.db.query(
       'local_lexicon_entries',
-      where: 'is_custom = 1 AND status = ?',
+      where: 'status = ?',
       whereArgs: ['active'],
+      orderBy: 'is_custom ASC, updated_at ASC',
     );
-    localCustomLexicon.clear();
+    final result = <String, LexiconEntry>{};
     for (final row in rows) {
       try {
         final meanings = (jsonDecode('${row['meanings_json']}') as List)
             .map((item) => '$item')
             .toList();
-        localCustomLexicon['${row['word']}'] = LexiconEntry(
+        if (meanings.isEmpty) continue;
+        result['${row['word']}'] = LexiconEntry(
           word: '${row['word']}',
           kind: '${row['kind'] ?? '实词'}',
           meanings: meanings.map((item) => LexiconMeaning(item)).toList(),
-          source: row['source'] as String? ?? '用户自定义',
+          source: row['source'] as String? ?? '数据库词条',
           confidence: (row['confidence'] as num? ?? 0.85).toDouble(),
         );
       } catch (_) {
-        // Invalid custom entries must not break the engine.
+        // Invalid rows must not break local translation.
       }
     }
+    return result;
   }
 }

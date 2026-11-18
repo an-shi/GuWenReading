@@ -131,7 +131,9 @@ class LocalTranslationResult {
 }
 
 class LocalClassicalEngine {
-  const LocalClassicalEngine();
+  const LocalClassicalEngine({required this.lexicon});
+
+  final Map<String, LexiconEntry> lexicon;
 
   static const engineVersion = 'local-engine-1';
 
@@ -207,7 +209,7 @@ class LocalClassicalEngine {
         length--
       ) {
         final word = source.substring(index, index + length);
-        final entry = lookupLexicon(word);
+        final entry = lexicon[word];
         if (entry != null) {
           final meanings = entry.meanings;
           tokens.add(
@@ -291,7 +293,7 @@ class LocalClassicalEngine {
       final next = i + 1 < tokens.length ? tokens[i + 1] : null;
       var gloss = token.gloss;
       if (token.ambiguous && alternate) {
-        final entry = lookupLexicon(token.word);
+        final entry = lexicon[token.word];
         if (entry != null && entry.meanings.length > 1) {
           gloss = entry.meanings[1].modern;
         }

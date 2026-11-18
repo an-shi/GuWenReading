@@ -5,6 +5,7 @@ import 'package:guwenreader/core/local/ai_service.dart';
 import 'package:guwenreader/core/local/app_database.dart';
 import 'package:guwenreader/core/local/import_service.dart';
 import 'package:guwenreader/core/local/local_engine/engine.dart';
+import 'package:guwenreader/core/local/local_engine/lexicon.dart';
 import 'package:guwenreader/core/local/local_engine/local_lexicon_service.dart';
 import 'package:guwenreader/core/local/local_store.dart';
 import 'package:guwenreader/core/local/translation_service.dart';
@@ -13,7 +14,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 
 void main() {
   test('local engine recognizes judgment and fixed patterns', () {
-    const engine = LocalClassicalEngine();
+    const engine = LocalClassicalEngine(lexicon: builtinLexicon);
     final judgment = engine.translate('廉颇者，赵之良将也。');
     expect(judgment.text, contains('是'));
     expect(judgment.rules, contains('判断句：……者，……也'));
@@ -45,7 +46,19 @@ void main() {
         source: '测试自定义',
       );
       await lexicon.loadCustom();
-      const engine = LocalClassicalEngine();
+      final builtinRows = await store.db.rawQuery(
+        "SELECT COUNT(*) AS n FROM local_lexicon_entries WHERE is_custom = 0",
+      );
+      expect(builtinRows.first['n'], greaterThan(50));
+      await lexicon.upsert(
+        word: '走',
+        kind: '动词',
+        meanings: const ['步行'],
+        source: '测试覆盖',
+      );
+      final effective = await lexicon.effectiveLexicon();
+      expect(effective['走']!.meanings.first.modern, '步行');
+      final engine = LocalClassicalEngine(lexicon: effective);
       final result = engine.translate('考其德行。');
       expect(result.tokens.any((token) => token.word == '考'), isTrue);
       expect(result.text, contains('考察'));

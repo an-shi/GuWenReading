@@ -131,7 +131,8 @@ class _LocalLexiconScreenState extends ConsumerState<LocalLexiconScreen> {
           .toList();
       if (word.text.trim().isNotEmpty && values.isNotEmpty) {
         final service = ref.read(localLexiconProvider);
-        if (entry != null && entry['word'] != word.text.trim()) {
+        final isCustom = entry?['is_custom'] == 1;
+        if (isCustom && entry != null && entry['word'] != word.text.trim()) {
           await service.remove('${entry['id']}');
         }
         await service.upsert(
@@ -194,7 +195,8 @@ class _LocalLexiconScreenState extends ConsumerState<LocalLexiconScreen> {
           ),
           const SizedBox(height: 4),
           Text(
-            '自定义词条优先于内置词库；共 ${_entries.length} 条自定义词条。',
+            '词库共 ${_entries.length} 条（自定义 ${_entries.where((item) => item['is_custom'] == 1).length} 条）。'
+            '编辑内置词条会创建个人覆盖，不修改内置原始记录。',
             style: theme.textTheme.bodySmall?.copyWith(
               color: theme.colorScheme.onSurface.withValues(alpha: 0.5),
             ),
@@ -257,16 +259,21 @@ class _LocalLexiconScreenState extends ConsumerState<LocalLexiconScreen> {
                                 vertical: 1,
                               ),
                               decoration: BoxDecoration(
-                                color: theme.colorScheme.primary.withValues(
-                                  alpha: 0.07,
-                                ),
+                                color:
+                                    (entry['is_custom'] == 1
+                                            ? theme.colorScheme.tertiary
+                                            : theme.colorScheme.primary)
+                                        .withValues(alpha: 0.07),
                                 borderRadius: BorderRadius.circular(4),
                               ),
                               child: Text(
-                                '${entry['kind']}',
+                                '${entry['kind']} · '
+                                '${entry['is_custom'] == 1 ? '自定义' : '内置'}',
                                 style: TextStyle(
                                   fontSize: 9.5,
-                                  color: theme.colorScheme.primary,
+                                  color: entry['is_custom'] == 1
+                                      ? theme.colorScheme.tertiary
+                                      : theme.colorScheme.primary,
                                 ),
                               ),
                             ),

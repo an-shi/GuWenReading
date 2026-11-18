@@ -13,6 +13,7 @@ import 'ai_service.dart';
 import 'budget_service.dart';
 import 'local_engine/engine.dart';
 import 'local_engine/lexicon.dart';
+import 'local_engine/local_lexicon_service.dart';
 import 'local_models.dart';
 import 'local_store.dart';
 import 'quality_service.dart';
@@ -25,15 +26,17 @@ class TranslationService {
     required this.client,
     BudgetService? budgets,
     QualityService? quality,
+    LocalLexiconService? lexiconService,
   }) : budgets = budgets ?? BudgetService(store: store),
-       quality = quality ?? const QualityService();
+       quality = quality ?? const QualityService(),
+       lexiconService = lexiconService ?? LocalLexiconService(store);
 
   final LocalStore store;
   final AiSettingsService aiSettings;
   final AiJsonClient client;
   final BudgetService budgets;
   final QualityService quality;
-  final LocalClassicalEngine localEngine = const LocalClassicalEngine();
+  final LocalLexiconService lexiconService;
 
   Future<String> _translationMode() async {
     try {
@@ -165,6 +168,8 @@ class TranslationService {
     required bool save,
     required Set<LocalConfidence> saveLevels,
   }) async {
+    final lexicon = await lexiconService.effectiveLexicon();
+    final engine = LocalClassicalEngine(lexicon: lexicon);
     final results = <String, LocalTranslationResult>{};
     var completed = 0;
     var high = 0;
@@ -200,14 +205,14 @@ class TranslationService {
             jsonDecode(cached) as Map<String, dynamic>,
           );
         } catch (_) {
-          result = localEngine.translate(
+          result = engine.translate(
             sentence.originalText,
             previousSentence: previous,
             nextSentence: next,
           );
         }
       } else {
-        result = localEngine.translate(
+        result = engine.translate(
           sentence.originalText,
           previousSentence: previous,
           nextSentence: next,

@@ -439,8 +439,3 @@ const builtinPatterns = <String, String>{
   '若……则……': '如果……就……',
   '虽……然……': '虽然……但是……',
 };
-
-final Map<String, LexiconEntry> localCustomLexicon = {};
-
-LexiconEntry? lookupLexicon(String word) =>
-    localCustomLexicon[word] ?? builtinLexicon[word];

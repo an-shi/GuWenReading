@@ -15,6 +15,7 @@ import '../../core/local/budget_service.dart';
 import '../../core/local/data_directory_service.dart';
 import '../../core/local/local_models.dart';
 import 'provider_editor.dart';
+import 'local_lexicon_screen.dart';
 import '../../core/providers.dart';
 import '../../core/storage/settings_controller.dart';
 import '../../data/models.dart';
@@ -106,10 +107,17 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
                   child: Wrap(
                     spacing: 4,
                     children: [
-                      for (var index = 0; index < 5; index++)
+                      for (var index = 0; index < 6; index++)
                         ChoiceChip(
                           label: Text(
-                            const ['AI 模型', '提示词', '阅读', '数据备份', '关于'][index],
+                            const [
+                              'AI 模型',
+                              '提示词',
+                              '阅读',
+                              '数据备份',
+                              '词库',
+                              '关于',
+                            ][index],
                           ),
                           selected: _tab == index,
                           onSelected: (_) => setState(() => _tab = index),
@@ -126,6 +134,7 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
                       _promptTab(theme),
                       _readingTab(theme),
                       _backupTab(theme),
+                      const LocalLexiconScreen(),
                       _aboutTab(theme),
                     ],
                   ),

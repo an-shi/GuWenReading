@@ -573,6 +573,7 @@ class LocalStore {
     required String origin,
     String? modelName,
     int? promptVersion,
+    String? localAnalysis,
     bool manualRetranslate = false,
   }) async {
     final existing = await db.query(
@@ -615,6 +616,7 @@ class LocalStore {
           'origin': origin,
           'model_name': modelName,
           'prompt_version': promptVersion,
+          'local_analysis': localAnalysis,
           'version': (current['version'] as int? ?? 1) + 1,
           'updated_at': now,
         },
@@ -629,6 +631,7 @@ class LocalStore {
         'origin': origin,
         'model_name': modelName,
         'prompt_version': promptVersion,
+        'local_analysis': localAnalysis,
         'version': 1,
         'created_at': now,
         'updated_at': now,
@@ -1478,6 +1481,64 @@ class LocalStore {
     cacheWriteTokens: row['cache_write_tokens'] as int? ?? 0,
     cost: (row['cost'] as num? ?? 0).toDouble(),
   );
+
+  Future<String?> localTranslationCache(String cacheKey) async {
+    final rows = await db.query(
+      'local_translation_cache',
+      where: 'cache_key = ?',
+      whereArgs: [cacheKey],
+      limit: 1,
+    );
+    if (rows.isEmpty) return null;
+    await db.update(
+      'local_translation_cache',
+      {'last_used_at': nowIso()},
+      where: 'cache_key = ?',
+      whereArgs: [cacheKey],
+    );
+    return rows.first['result_json'] as String?;
+  }
+
+  Future<void> putLocalTranslationCache({
+    required String cacheKey,
+    required String sourceHash,
+    required String lexiconVersion,
+    required String engineVersion,
+    required String resultJson,
+  }) async {
+    final now = nowIso();
+    await db.insert('local_translation_cache', {
+      'cache_key': cacheKey,
+      'source_hash': sourceHash,
+      'lexicon_version': lexiconVersion,
+      'engine_version': engineVersion,
+      'result_json': resultJson,
+      'created_at': now,
+      'last_used_at': now,
+    }, conflictAlgorithm: ConflictAlgorithm.replace);
+  }
+
+  Future<void> recordLocalRevision({
+    String? sentenceId,
+    String? bookId,
+    String? chapterId,
+    required String originalText,
+    String? originalCandidate,
+    required String revisedText,
+    String? note,
+  }) async {
+    await db.insert('local_translation_revisions', {
+      'id': newLocalId('lrev'),
+      'sentence_id': sentenceId,
+      'book_id': bookId,
+      'chapter_id': chapterId,
+      'original_text': originalText,
+      'original_candidate': originalCandidate,
+      'revised_text': revisedText,
+      'note': note,
+      'created_at': nowIso(),
+    });
+  }
 
   Future<String?> translationSentenceCache(String cacheKey) async {
     final rows = await db.query(

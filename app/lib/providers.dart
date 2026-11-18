@@ -14,6 +14,8 @@ export '../core/providers.dart'
         aiSettingsProvider,
         budgetServiceProvider,
         qualityServiceProvider,
+        tokenizerVocabularyProvider,
+        localLexiconProvider,
         importServiceProvider,
         translationServiceProvider,
         knowledgeServiceProvider,

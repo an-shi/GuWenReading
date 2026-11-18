@@ -1,7 +1,10 @@
+import 'dart:convert';
+
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../../core/local/local_engine/engine.dart';
 import '../../core/storage/settings_controller.dart';
 import '../../data/models.dart';
 import '../../domain/reading_mode.dart';
@@ -425,6 +428,71 @@ class _SentenceSheetState extends ConsumerState<_SentenceSheet> {
     }
   }
 
+  Future<void> _showLocalAnalysis() async {
+    final raw = widget.sentence.translation?.localAnalysis;
+    if (raw == null) return;
+    final result = LocalTranslationResult.fromJson(
+      jsonDecode(raw) as Map<String, dynamic>,
+    );
+    await showDialog<void>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('本地推测依据'),
+        content: SizedBox(
+          width: 680,
+          height: 520,
+          child: ListView(
+            children: [
+              Text(
+                '置信度：${result.confidenceLabel} · '
+                '${(result.score * 100).toStringAsFixed(0)}%',
+                style: const TextStyle(fontWeight: FontWeight.w600),
+              ),
+              const SizedBox(height: 8),
+              Text(result.text),
+              const SizedBox(height: 14),
+              Text('词语分析', style: Theme.of(context).textTheme.titleSmall),
+              for (final token in result.tokens)
+                ListTile(
+                  dense: true,
+                  contentPadding: EdgeInsets.zero,
+                  title: Text('${token.word} · ${token.kind}'),
+                  subtitle: Text(
+                    '${token.gloss}${token.note != null ? ' · ${token.note}' : ''}',
+                  ),
+                ),
+              if (result.rules.isNotEmpty) ...[
+                const SizedBox(height: 10),
+                Text('句式/语法规则', style: Theme.of(context).textTheme.titleSmall),
+                for (final rule in result.rules) Text('· $rule'),
+              ],
+              if (result.uncertainties.isNotEmpty) ...[
+                const SizedBox(height: 10),
+                Text('不确定内容', style: Theme.of(context).textTheme.titleSmall),
+                for (final item in result.uncertainties) Text('· $item'),
+              ],
+              if (result.candidates.length > 1) ...[
+                const SizedBox(height: 10),
+                Text('候选译文', style: Theme.of(context).textTheme.titleSmall),
+                for (final candidate in result.candidates)
+                  Text(
+                    '· ${candidate.text} '
+                    '(${(candidate.score * 100).toStringAsFixed(0)}%)',
+                  ),
+              ],
+            ],
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: const Text('关闭'),
+          ),
+        ],
+      ),
+    );
+  }
+
   Future<void> _editTranslation() async {
     final controller = TextEditingController(
       text: widget.sentence.translation?.text ?? '',
@@ -662,6 +730,12 @@ class _SentenceSheetState extends ConsumerState<_SentenceSheet> {
                   icon: const Icon(Icons.translate_rounded, size: 18),
                   label: const Text('重新翻译此句'),
                 ),
+                if (widget.sentence.translation?.localAnalysis != null)
+                  TextButton.icon(
+                    onPressed: _showLocalAnalysis,
+                    icon: const Icon(Icons.account_tree_outlined, size: 18),
+                    label: const Text('查看推测依据'),
+                  ),
                 TextButton.icon(
                   onPressed: () => _retranslateSentence(useCache: false),
                   icon: const Icon(Icons.refresh_rounded, size: 18),

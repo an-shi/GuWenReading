@@ -20,7 +20,7 @@ cd app
 flutter test
 ```
 
-结果：`41 tests passed`
+结果：`44 tests passed`
 
 覆盖：
 
@@ -52,6 +52,8 @@ flutter test
 - 段落证据、证据上下文、逐条审核状态与审核历史。
 - specialized 专项抽取：实体/关系/事件独立 Prompt、独立模型与路由记录。
 - Tokenizer 词表安装、校验、注册、卸载和损坏回退。
+- 本地文言引擎：固定句式、判断句、多义词、置信度、词库缓存和零 AI 调用。
+- 本地优先与 AI+本地参考模式。
 
 ### Android 构建
 
@@ -100,7 +102,7 @@ flutter build windows --debug
 - Windows 端关闭 Flutter 的 MSAA/UIA 无障碍树，规避 Flutter 3.47 引擎在原生文件对话框关闭时 `AccessibilityBridge::CreateRemoveReparentedNodesUpdate` 的崩溃。
 - 书架支持编辑书籍信息与永久删除；使用临时数据库验证删除会清理章节、句子、译文、批注、书签、进度、人物、关系、事件、任务、助手会话、FTS 索引及原始文件。
 - AI 流水线使用本地 Mock OpenAI 兼容服务验证：Token/费用计量、翻译短 ID、逐句/批次缓存、任务去重、联合抽取、长章节分块、失败块重试、事件证据合并、重复抽取跳过、单次预算暂停。
-- 验证方式：`flutter analyze` 无问题，`flutter test` 41 项通过，`flutter build windows --debug` 成功且应用可打开。
+- 验证方式：`flutter analyze` 无问题，`flutter test` 44 项通过，`flutter build windows --debug` 成功且应用可打开。
 
 ## 3. 验证过的核心路径
 
@@ -132,6 +134,7 @@ flutter build windows --debug
 4. 导入文本型 PDF，确认 PDFium 路径。
 5. 导入扫描版 PDF，确认被明确拒绝。
 6. 创建/导出/恢复备份，确认重启后数据一致。
+
 
 
 

@@ -84,6 +84,7 @@ const List<String> schemaStatements = [
     status TEXT NOT NULL DEFAULT 'completed',
     model_name TEXT,
     prompt_version INTEGER,
+    local_analysis TEXT,
     version INTEGER NOT NULL DEFAULT 1,
     edited_at TEXT,
     created_at TEXT NOT NULL,
@@ -637,4 +638,44 @@ const List<String> schemaStatements = [
   )
   ''',
   'CREATE INDEX IF NOT EXISTS idx_gemini_cache_key ON gemini_cached_contents(cache_key, status)',
+  '''
+  CREATE TABLE IF NOT EXISTS local_lexicon_entries (
+    id TEXT PRIMARY KEY,
+    word TEXT NOT NULL,
+    kind TEXT NOT NULL DEFAULT '实词',
+    meanings_json TEXT NOT NULL,
+    source TEXT,
+    version TEXT,
+    confidence REAL NOT NULL DEFAULT 0.8,
+    is_custom INTEGER NOT NULL DEFAULT 0,
+    status TEXT NOT NULL DEFAULT 'active',
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+  )
+  ''',
+  'CREATE INDEX IF NOT EXISTS idx_local_lexicon_word ON local_lexicon_entries(word, status)',
+  '''
+  CREATE TABLE IF NOT EXISTS local_translation_cache (
+    cache_key TEXT PRIMARY KEY,
+    source_hash TEXT NOT NULL,
+    lexicon_version TEXT NOT NULL,
+    engine_version TEXT NOT NULL,
+    result_json TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    last_used_at TEXT NOT NULL
+  )
+  ''',
+  '''
+  CREATE TABLE IF NOT EXISTS local_translation_revisions (
+    id TEXT PRIMARY KEY,
+    sentence_id TEXT,
+    book_id TEXT,
+    chapter_id TEXT,
+    original_text TEXT NOT NULL,
+    original_candidate TEXT,
+    revised_text TEXT NOT NULL,
+    note TEXT,
+    created_at TEXT NOT NULL
+  )
+  ''',
 ];

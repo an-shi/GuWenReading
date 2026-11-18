@@ -42,6 +42,7 @@ class BackupService {
     'knowledge_extraction_state',
     'translation_cache',
     'entity_disambiguation_cache',
+    'local_translation_cache',
   ];
 
   static const _restoreTables = <String>[
@@ -79,6 +80,9 @@ class BackupService {
     'entity_disambiguation_cache',
     'knowledge_review_events',
     'ai_routing_decisions',
+    'local_lexicon_entries',
+    'local_translation_cache',
+    'local_translation_revisions',
     'translation_sentence_cache',
     'knowledge_chunk_cache',
     'knowledge_extraction_state',

@@ -179,6 +179,7 @@ class TranslationRecord {
     this.origin = 'ai',
     this.status = 'completed',
     this.modelName,
+    this.localAnalysis,
     this.version = 1,
   });
 
@@ -188,6 +189,7 @@ class TranslationRecord {
   final String origin;
   final String status;
   final String? modelName;
+  final String? localAnalysis;
   final int version;
 
   bool get isManual => origin == 'manual';
@@ -200,6 +202,7 @@ class TranslationRecord {
         origin: json['origin'] as String? ?? 'ai',
         status: json['status'] as String? ?? 'completed',
         modelName: _str(json['model_name']),
+        localAnalysis: _str(json['local_analysis']),
         version: _int(json['version'], 1),
       );
 
@@ -210,6 +213,7 @@ class TranslationRecord {
     'origin': origin,
     'status': status,
     'model_name': modelName,
+    'local_analysis': localAnalysis,
     'version': version,
   };
 }

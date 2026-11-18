@@ -75,6 +75,9 @@
 - `ai_routing_decisions`：任务类型、原始/实际模型、路由模式、专项触发原因、故障切换与费用。
 - `tokenizer_vocabularies`：可安装词表的名称、版本、适用模型、来源、大小、校验值、状态和内容。
 - `gemini_cached_contents`：Gemini Cached Contents 资源名、TTL、到期时间和状态（服务层预留）。
+- `local_lexicon_entries`：用户自定义本地词条，独立于内置词库。
+- `local_translation_cache`：本地规则引擎缓存，Key 含原文、上下文、词库版本和引擎版本。
+- `local_translation_revisions`：用户修订本地推测译文的记录，不污染公共词库。
 
 关系/事件编辑字段：
 

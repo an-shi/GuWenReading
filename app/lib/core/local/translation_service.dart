@@ -4,12 +4,15 @@ import 'dart:math' as math;
 
 import 'package:collection/collection.dart';
 import 'package:crypto/crypto.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 import 'package:sqflite/sqflite.dart';
 
 import '../../data/models.dart';
 import 'ai_scheduler.dart';
 import 'ai_service.dart';
 import 'budget_service.dart';
+import 'local_engine/engine.dart';
+import 'local_engine/lexicon.dart';
 import 'local_models.dart';
 import 'local_store.dart';
 import 'quality_service.dart';
@@ -30,6 +33,16 @@ class TranslationService {
   final AiJsonClient client;
   final BudgetService budgets;
   final QualityService quality;
+  final LocalClassicalEngine localEngine = const LocalClassicalEngine();
+
+  Future<String> _translationMode() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      return prefs.getString('translation_engine_mode') ?? 'ai';
+    } catch (_) {
+      return 'ai';
+    }
+  }
 
   static const _cachePolicyVersion = 2;
 
@@ -53,11 +66,18 @@ class TranslationService {
     }
     final content = await store.chapterContent(chapterId);
     if (content == null) throw TranslationException('章节不存在');
-    final resolved = await aiSettings.resolve(purpose: 'translation');
-    final estimate = await _estimateCost(content, resolved, retranslate);
+    final mode = await _translationMode();
+    final resolved = mode == 'local'
+        ? null
+        : await aiSettings.resolve(purpose: 'translation');
+    final estimate = mode == 'local'
+        ? 0.0
+        : await _estimateCost(content, resolved, retranslate);
     final task = await store.createTask(
       type: 'translation',
-      title: '翻译《${content.bookTitle}》· ${content.chapterTitle}',
+      title: mode == 'local'
+          ? '本地推测翻译《${content.bookTitle}》· ${content.chapterTitle}'
+          : '翻译《${content.bookTitle}》· ${content.chapterTitle}',
       total: content.paragraphs.fold<int>(
         0,
         (sum, paragraph) => sum + paragraph.sentences.length,
@@ -79,7 +99,15 @@ class TranslationService {
       );
       throw BudgetExceededException(reservation.message ?? '预算不足');
     }
-    unawaited(_run(task.id, chapterId, retranslate));
+    if (mode == 'local') {
+      unawaited(_runLocal(task.id, chapterId, retranslate));
+    } else if (mode == 'local_first') {
+      unawaited(_runLocalFirst(task.id, chapterId, retranslate));
+    } else if (mode == 'ai_reference') {
+      unawaited(_runAiReference(task.id, chapterId, retranslate));
+    } else {
+      unawaited(_run(task.id, chapterId, retranslate));
+    }
     return task;
   }
 
@@ -118,12 +146,270 @@ class TranslationService {
       return;
     }
     await store.claimTask(taskId, appInstanceId, stage: '恢复翻译');
-    unawaited(_run(taskId, task.chapterId!, false));
+    final mode = await _translationMode();
+    if (mode == 'local') {
+      unawaited(_runLocal(taskId, task.chapterId!, false));
+    } else if (mode == 'local_first') {
+      unawaited(_runLocalFirst(taskId, task.chapterId!, false));
+    } else if (mode == 'ai_reference') {
+      unawaited(_runAiReference(taskId, task.chapterId!, false));
+    } else {
+      unawaited(_run(taskId, task.chapterId!, false));
+    }
   }
 
-  Future<void> _run(String taskId, String chapterId, bool retranslate) async {
+  Future<Map<String, LocalTranslationResult>> _localPass(
+    String taskId,
+    ChapterContent content,
+    bool retranslate, {
+    required bool save,
+    required Set<LocalConfidence> saveLevels,
+  }) async {
+    final results = <String, LocalTranslationResult>{};
+    var completed = 0;
+    var high = 0;
+    var medium = 0;
+    var low = 0;
+    final sentences = content.paragraphs
+        .expand((paragraph) => paragraph.sentences)
+        .toList();
+    for (var index = 0; index < sentences.length; index++) {
+      final sentence = sentences[index];
+      if (sentence.translation?.isManual ?? false) continue;
+      if (!retranslate && sentence.translation != null) continue;
+      final previous = index > 0 ? sentences[index - 1].originalText : null;
+      final next = index + 1 < sentences.length
+          ? sentences[index + 1].originalText
+          : null;
+      final sourceHash = sha256
+          .convert(utf8.encode(sentence.originalText))
+          .toString();
+      final cacheKey = sha256
+          .convert(
+            utf8.encode(
+              '$sourceHash|${previous ?? ''}|${next ?? ''}|'
+              '$lexiconVersion|${LocalClassicalEngine.engineVersion}',
+            ),
+          )
+          .toString();
+      LocalTranslationResult result;
+      final cached = await store.localTranslationCache(cacheKey);
+      if (cached != null) {
+        try {
+          result = LocalTranslationResult.fromJson(
+            jsonDecode(cached) as Map<String, dynamic>,
+          );
+        } catch (_) {
+          result = localEngine.translate(
+            sentence.originalText,
+            previousSentence: previous,
+            nextSentence: next,
+          );
+        }
+      } else {
+        result = localEngine.translate(
+          sentence.originalText,
+          previousSentence: previous,
+          nextSentence: next,
+        );
+        await store.putLocalTranslationCache(
+          cacheKey: cacheKey,
+          sourceHash: sourceHash,
+          lexiconVersion: lexiconVersion,
+          engineVersion: LocalClassicalEngine.engineVersion,
+          resultJson: jsonEncode(result.toJson()),
+        );
+      }
+      results[sentence.id] = result;
+      switch (result.confidence) {
+        case LocalConfidence.high:
+          high += 1;
+        case LocalConfidence.medium:
+          medium += 1;
+        case LocalConfidence.low:
+          low += 1;
+      }
+      if (save && saveLevels.contains(result.confidence)) {
+        await _saveLocalTranslation(
+          content: content,
+          sentence: sentence,
+          result: result,
+        );
+        completed += 1;
+      }
+      if (index % 20 == 0) {
+        await store.touchTask(
+          taskId,
+          stage: '本地推测 ${index + 1}/${sentences.length}',
+          checkpoint: sentence.id,
+        );
+      }
+    }
+    await store.updateTask(
+      taskId,
+      progress: sentences.isEmpty ? 100 : completed / sentences.length * 100,
+      completed: completed,
+      result: {
+        'local_count': results.length,
+        'local_high': high,
+        'local_medium': medium,
+        'local_low': low,
+        'local_saved': completed,
+        'engine': LocalClassicalEngine.engineVersion,
+        'lexicon_version': lexiconVersion,
+      },
+    );
+    return results;
+  }
+
+  Future<void> _saveLocalTranslation({
+    required ChapterContent content,
+    required Sentence sentence,
+    required LocalTranslationResult result,
+  }) async {
+    await store.upsertTranslation(
+      sentenceId: sentence.id,
+      text: result.text,
+      origin: 'local_rule',
+      modelName: '本地规则 v1 · ${result.confidenceLabel}',
+      localAnalysis: jsonEncode(result.toJson()),
+    );
+    await store.indexSentence(
+      sentenceId: sentence.id,
+      bookId: content.bookId,
+      chapterId: content.chapterId,
+      text: result.text,
+      docType: 'translation',
+    );
+  }
+
+  Future<void> _runLocal(
+    String taskId,
+    String chapterId,
+    bool retranslate,
+  ) async {
+    final stopwatch = Stopwatch()..start();
     try {
-      await _runInner(taskId, chapterId, retranslate);
+      final content = await store.chapterContent(chapterId);
+      if (content == null) {
+        await store.updateTask(taskId, status: 'failed', error: '章节不存在');
+        return;
+      }
+      await store.claimTask(taskId, appInstanceId, stage: '本地规则分析');
+      final results = await _localPass(
+        taskId,
+        content,
+        retranslate,
+        save: true,
+        saveLevels: LocalConfidence.values.toSet(),
+      );
+      stopwatch.stop();
+      await store.refreshBookStats(content.bookId);
+      await store.updateTask(
+        taskId,
+        status: 'completed',
+        progress: 100,
+        completed: results.length,
+        result: {
+          'local_count': results.length,
+          'local_high': results.values
+              .where((result) => result.confidence == LocalConfidence.high)
+              .length,
+          'local_medium': results.values
+              .where((result) => result.confidence == LocalConfidence.medium)
+              .length,
+          'local_low': results.values
+              .where((result) => result.confidence == LocalConfidence.low)
+              .length,
+          'local_saved': results.length,
+          'ai_count': 0,
+          'elapsed_ms': stopwatch.elapsedMilliseconds,
+          'engine': LocalClassicalEngine.engineVersion,
+        },
+      );
+    } finally {
+      await budgets.release(taskId);
+    }
+  }
+
+  Future<void> _runLocalFirst(
+    String taskId,
+    String chapterId,
+    bool retranslate,
+  ) async {
+    final content = await store.chapterContent(chapterId);
+    if (content == null) {
+      await store.updateTask(taskId, status: 'failed', error: '章节不存在');
+      await budgets.release(taskId);
+      return;
+    }
+    await store.claimTask(taskId, appInstanceId, stage: '本地优先翻译');
+    final results = await _localPass(
+      taskId,
+      content,
+      retranslate,
+      save: true,
+      saveLevels: const {LocalConfidence.high, LocalConfidence.medium},
+    );
+    final low = results.values
+        .where((result) => result.confidence == LocalConfidence.low)
+        .length;
+    if (low == 0) {
+      await store.refreshBookStats(content.bookId);
+      await store.updateTask(
+        taskId,
+        status: 'completed',
+        progress: 100,
+        completed: results.length,
+        result: {
+          'local_count': results.length,
+          'local_saved': results.length,
+          'ai_count': 0,
+          'engine': LocalClassicalEngine.engineVersion,
+        },
+      );
+      await budgets.release(taskId);
+      return;
+    }
+    await _run(taskId, chapterId, retranslate);
+  }
+
+  Future<void> _runAiReference(
+    String taskId,
+    String chapterId,
+    bool retranslate,
+  ) async {
+    final content = await store.chapterContent(chapterId);
+    if (content == null) {
+      await store.updateTask(taskId, status: 'failed', error: '章节不存在');
+      await budgets.release(taskId);
+      return;
+    }
+    final results = await _localPass(
+      taskId,
+      content,
+      retranslate,
+      save: false,
+      saveLevels: const {},
+    );
+    await _run(
+      taskId,
+      chapterId,
+      retranslate,
+      references: {
+        for (final entry in results.entries) entry.key: entry.value.text,
+      },
+    );
+  }
+
+  Future<void> _run(
+    String taskId,
+    String chapterId,
+    bool retranslate, {
+    Map<String, String>? references,
+  }) async {
+    try {
+      await _runInner(taskId, chapterId, retranslate, references: references);
     } finally {
       await budgets.release(taskId);
     }
@@ -132,8 +418,9 @@ class TranslationService {
   Future<void> _runInner(
     String taskId,
     String chapterId,
-    bool retranslate,
-  ) async {
+    bool retranslate, {
+    Map<String, String>? references,
+  }) async {
     final content = await store.chapterContent(chapterId);
     if (content == null) {
       await store.updateTask(taskId, status: 'failed', error: '章节不存在');
@@ -252,7 +539,7 @@ class TranslationService {
           for (final entry in localById.entries)
             {'id': entry.key, 'text': entry.value.originalText},
         ];
-        final prompt = await aiSettings.render('translation', {
+        var prompt = await aiSettings.render('translation', {
           'book_title': content.bookTitle,
           'author': content.bookAuthor ?? '未详',
           'chapter_title': content.chapterTitle,
@@ -260,6 +547,22 @@ class TranslationService {
           'context_after': _context(content, batch.last, before: false),
           'items_json': jsonEncode(items),
         });
+        if (references != null) {
+          final lines = <String>[];
+          for (final entry in localById.entries) {
+            final reference = references[entry.value.id];
+            if (reference == null) continue;
+            lines.add(
+              '${entry.key}. ${entry.value.originalText}\n'
+              '本地规则参考：$reference',
+            );
+          }
+          if (lines.isNotEmpty) {
+            prompt +=
+                '\n\n以下是本地规则参考译文，可能有误，仅用于校正，不得直接照抄：\n'
+                '${lines.join('\n')}';
+          }
+        }
         final cacheKey = sha256
             .convert(
               utf8.encode(
@@ -551,6 +854,35 @@ class TranslationService {
       text.length <= maxLength ? text : text.substring(0, maxLength);
 
   Future<void> saveManual(String sentenceId, String text) async {
+    final beforeRows = await store.db.query(
+      'translations',
+      where: 'sentence_id = ?',
+      whereArgs: [sentenceId],
+      limit: 1,
+    );
+    if (beforeRows.isNotEmpty && beforeRows.first['origin'] == 'local_rule') {
+      final sentenceRows = await store.db.query(
+        'sentences',
+        where: 'id = ?',
+        whereArgs: [sentenceId],
+        limit: 1,
+      );
+      await store.recordLocalRevision(
+        sentenceId: sentenceId,
+        bookId: sentenceRows.isEmpty
+            ? null
+            : sentenceRows.first['book_id'] as String?,
+        chapterId: sentenceRows.isEmpty
+            ? null
+            : sentenceRows.first['chapter_id'] as String?,
+        originalText: sentenceRows.isEmpty
+            ? ''
+            : '${sentenceRows.first['original_text'] ?? ''}',
+        originalCandidate: beforeRows.first['text'] as String?,
+        revisedText: text.trim(),
+        note: '用户修订本地推测译文',
+      );
+    }
     await store.upsertTranslation(
       sentenceId: sentenceId,
       text: text.trim(),

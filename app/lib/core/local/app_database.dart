@@ -391,6 +391,7 @@ class AppDatabase {
       'entity_mentions': provenanceColumns,
       'relation_sources': provenanceColumns,
       'event_sources': provenanceColumns,
+      'translations': {'local_analysis': 'TEXT'},
     };
     for (final entry in additions.entries) {
       final info = await db.rawQuery('PRAGMA table_info(${entry.key})');

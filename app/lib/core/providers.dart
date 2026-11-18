@@ -7,6 +7,7 @@ import 'local/backup_service.dart';
 import 'local/budget_service.dart';
 import 'local/import_service.dart';
 import 'local/knowledge_service.dart';
+import 'local/local_engine/local_lexicon_service.dart';
 import 'local/local_api.dart';
 import 'local/local_store.dart';
 import 'local/quality_service.dart';
@@ -41,6 +42,10 @@ final qualityServiceProvider = Provider<QualityService>((ref) {
 
 final tokenizerVocabularyProvider = Provider<TokenizerVocabularyService>((ref) {
   return TokenizerVocabularyService(ref.watch(localStoreProvider));
+});
+
+final localLexiconProvider = Provider<LocalLexiconService>((ref) {
+  return LocalLexiconService(ref.watch(localStoreProvider));
 });
 
 final importServiceProvider = Provider<ImportService>((ref) {

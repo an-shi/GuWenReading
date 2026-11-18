@@ -680,10 +680,47 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
               SwitchListTile(
                 contentPadding: EdgeInsets.zero,
                 title: const Text('打开章节时自动翻译'),
-                subtitle: const Text('仅在已配置默认翻译模型且存在未译句子时触发。'),
+                subtitle: const Text('使用当前选择的翻译引擎；本地模式不会调用远程 API。'),
                 value: settings.autoTranslate,
                 onChanged: (value) =>
                     ref.read(settingsProvider.notifier).setAutoTranslate(value),
+              ),
+              const SizedBox(height: 10),
+              DropdownButtonFormField<String>(
+                initialValue: settings.translationMode,
+                decoration: const InputDecoration(labelText: '翻译引擎模式'),
+                items: const [
+                  DropdownMenuItem(value: 'ai', child: Text('AI 翻译')),
+                  DropdownMenuItem(
+                    value: 'local',
+                    child: Text('本地推测（完全离线，零 API）'),
+                  ),
+                  DropdownMenuItem(
+                    value: 'local_first',
+                    child: Text('本地优先（高/中置信度本地，低置信度 AI）'),
+                  ),
+                  DropdownMenuItem(
+                    value: 'ai_reference',
+                    child: Text('AI + 本地参考（消耗 API）'),
+                  ),
+                ],
+                onChanged: (value) {
+                  if (value != null) {
+                    ref
+                        .read(settingsProvider.notifier)
+                        .setTranslationMode(value);
+                  }
+                },
+              ),
+              Padding(
+                padding: const EdgeInsets.only(top: 4),
+                child: Text(
+                  '本地推测结果会标记来源与置信度，仅作规则参考，不冒充权威译文。',
+                  style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                    color: Theme.of(context).colorScheme.onSurface
+                        .withValues(alpha: 0.45),
+                  ),
+                ),
               ),
             ],
           ),

@@ -8,6 +8,7 @@ class AppSettings {
     this.lineHeight = 1.9,
     this.defaultReadingMode = 'alternating',
     this.autoTranslate = false,
+    this.translationMode = 'ai',
     this.aiTaskBudget = 0,
     this.loaded = false,
   });
@@ -17,6 +18,7 @@ class AppSettings {
   final double lineHeight;
   final String defaultReadingMode;
   final bool autoTranslate;
+  final String translationMode;
 
   /// Maximum estimated cost for a single AI task. Zero means unlimited.
   /// The unit follows the model price configuration.
@@ -29,6 +31,7 @@ class AppSettings {
     double? lineHeight,
     String? defaultReadingMode,
     bool? autoTranslate,
+    String? translationMode,
     double? aiTaskBudget,
     bool? loaded,
   }) {
@@ -38,6 +41,7 @@ class AppSettings {
       lineHeight: lineHeight ?? this.lineHeight,
       defaultReadingMode: defaultReadingMode ?? this.defaultReadingMode,
       autoTranslate: autoTranslate ?? this.autoTranslate,
+      translationMode: translationMode ?? this.translationMode,
       aiTaskBudget: aiTaskBudget ?? this.aiTaskBudget,
       loaded: loaded ?? this.loaded,
     );
@@ -50,6 +54,7 @@ class SettingsController extends Notifier<AppSettings> {
   static const _keyLine = 'line_height';
   static const _keyMode = 'default_reading_mode';
   static const _keyAuto = 'auto_translate';
+  static const _keyTranslationMode = 'translation_engine_mode';
   static const _keyAiTaskBudget = 'ai_task_budget';
 
   @override
@@ -63,6 +68,7 @@ class SettingsController extends Notifier<AppSettings> {
       lineHeight: prefs.getDouble(_keyLine) ?? 1.9,
       defaultReadingMode: prefs.getString(_keyMode) ?? 'alternating',
       autoTranslate: prefs.getBool(_keyAuto) ?? false,
+      translationMode: prefs.getString(_keyTranslationMode) ?? 'ai',
       aiTaskBudget: prefs.getDouble(_keyAiTaskBudget) ?? 0,
       loaded: true,
     );
@@ -98,6 +104,12 @@ class SettingsController extends Notifier<AppSettings> {
     state = state.copyWith(autoTranslate: value);
     final prefs = await SharedPreferences.getInstance();
     await prefs.setBool(_keyAuto, value);
+  }
+
+  Future<void> setTranslationMode(String value) async {
+    state = state.copyWith(translationMode: value);
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setString(_keyTranslationMode, value);
   }
 
   Future<void> setAiTaskBudget(double value) async {

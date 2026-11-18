@@ -206,7 +206,34 @@ class ReaderParagraph extends StatelessWidget {
                 ),
               ),
             ),
-            child: _translation(context),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                if (paragraph.sentences.any(
+                  (sentence) => sentence.translation?.origin == 'local_rule',
+                )) ...[
+                  Row(
+                    children: [
+                      Icon(
+                        Icons.offline_bolt_outlined,
+                        size: 12,
+                        color: theme.colorScheme.tertiary,
+                      ),
+                      const SizedBox(width: 4),
+                      Text(
+                        '本地规则推测 · 非权威译文',
+                        style: TextStyle(
+                          fontSize: 9.5,
+                          color: theme.colorScheme.tertiary,
+                        ),
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 4),
+                ],
+                _translation(context),
+              ],
+            ),
           )
         else
           Padding(

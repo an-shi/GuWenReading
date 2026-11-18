@@ -196,6 +196,10 @@ class KnowledgeService {
     var qualityReviews = 0;
     var disambiguated = 0;
     var pendingReviews = 0;
+    var specializedCalls = 0;
+    var specializedMerged = 0;
+    var specializedConflicts = 0;
+    final cacheModelLabel = '${resolved.label}|${routing.mode}';
     for (var index = 0; index < chunks.length; index++) {
       final currentTask = await store.getTask(taskId);
       if (currentTask == null ||
@@ -209,7 +213,7 @@ class KnowledgeService {
           chapterId: chapterId,
           chunkIndex: chunk.index,
           contentHash: chunk.contentHash,
-          modelLabel: resolved.label,
+          modelLabel: cacheModelLabel,
           promptVersion: promptVersion,
           schemaVersion: schemaVersion,
         );
@@ -222,31 +226,43 @@ class KnowledgeService {
             for (var i = 0; i < chunk.sentences.length; i++)
               {'i': i + 1, 't': chunk.sentences[i].originalText},
           ];
-          final prompt = await aiSettings.render('knowledge_extract', {
-            'book_title': content.bookTitle,
-            'chapter_title': content.chapterTitle,
-            'items_json': jsonEncode(items),
-          });
-          data = await client.chatJson(
-            purpose: 'extraction',
-            prompt: prompt,
-            temperature: 0.1,
-            taskId: taskId,
-            taskType: 'knowledge_extraction',
-            promptVersion: promptVersion,
-            schemaVersion: schemaVersion,
-            shouldCancel: () async {
-              final current = await store.getTask(taskId);
-              return current == null ||
-                  current.status == 'cancelled' ||
-                  current.status == 'paused';
-            },
-          );
+          if (routing.mode == 'specialized') {
+            final result = await _specializedExtract(
+              items: items,
+              content: content,
+              resolved: resolved,
+              routing: routing,
+              taskId: taskId,
+            );
+            data = result.data;
+            specializedCalls += result.calls;
+          } else {
+            final prompt = await aiSettings.render('knowledge_extract', {
+              'book_title': content.bookTitle,
+              'chapter_title': content.chapterTitle,
+              'items_json': jsonEncode(items),
+            });
+            data = await client.chatJson(
+              purpose: 'extraction',
+              prompt: prompt,
+              temperature: 0.1,
+              taskId: taskId,
+              taskType: 'knowledge_extraction',
+              promptVersion: promptVersion,
+              schemaVersion: schemaVersion,
+              shouldCancel: () async {
+                final current = await store.getTask(taskId);
+                return current == null ||
+                    current.status == 'cancelled' ||
+                    current.status == 'paused';
+              },
+            );
+          }
           await store.putKnowledgeChunkCache(
             chapterId: chapterId,
             chunkIndex: chunk.index,
             contentHash: chunk.contentHash,
-            modelLabel: resolved.label,
+            modelLabel: cacheModelLabel,
             promptVersion: promptVersion,
             schemaVersion: schemaVersion,
             resultJson: jsonEncode(data),
@@ -265,6 +281,26 @@ class KnowledgeService {
           qualityReviews += 1;
         } else if (report.level == QualityLevel.warning) {
           qualityWarnings += 1;
+        }
+        if (routing.mode == 'hybrid' &&
+            cachedJson == null &&
+            report.level != QualityLevel.passed) {
+          final hybrid = await _hybridExtract(
+            data: data,
+            report: report,
+            items: [
+              for (var i = 0; i < chunk.sentences.length; i++)
+                {'i': i + 1, 't': chunk.sentences[i].originalText},
+            ],
+            content: content,
+            resolved: resolved,
+            routing: routing,
+            taskId: taskId,
+          );
+          data = hybrid.data;
+          specializedCalls += hybrid.calls;
+          specializedMerged += hybrid.merged;
+          specializedConflicts += hybrid.conflicts;
         }
         final decisions = await _resolveEntityDecisions(
           chunk: chunk,
@@ -355,6 +391,10 @@ class KnowledgeService {
         'quality_reviews': qualityReviews,
         'disambiguated': disambiguated,
         'pending_review': pendingReviews,
+        'specialized_calls': specializedCalls,
+        'specialized_merged': specializedMerged,
+        'specialized_conflicts': specializedConflicts,
+        'mode': routing.mode,
         'model': resolved.label,
       },
     );
@@ -369,6 +409,514 @@ class KnowledgeService {
       error: '$message。请提高预算后重新开始任务。',
     );
     return true;
+  }
+
+  Future<_SpecializedResult> _specializedExtract({
+    required List<Map<String, Object>> items,
+    required ChapterContent content,
+    required ResolvedAiModel resolved,
+    required KnowledgeRoutingConfig routing,
+    required String taskId,
+  }) async {
+    var calls = 0;
+    final existing = <Map<String, dynamic>>[];
+    final entityData = await _runEntitySpecialized(
+      items: items,
+      content: content,
+      resolved: resolved,
+      routing: routing,
+      taskId: taskId,
+      existing: existing,
+    );
+    calls += 1;
+    final entities = _normalizeEntities(entityData, existing);
+    final relationData = await _runRelationSpecialized(
+      items: items,
+      content: content,
+      resolved: resolved,
+      routing: routing,
+      taskId: taskId,
+      entities: entities,
+    );
+    calls += 1;
+    final relations = _normalizeRelations(relationData, entities);
+    final eventData = await _runEventSpecialized(
+      items: items,
+      content: content,
+      resolved: resolved,
+      routing: routing,
+      taskId: taskId,
+      entities: entities,
+    );
+    calls += 1;
+    final events = _normalizeEvents(eventData);
+    return _SpecializedResult(
+      data: {'entities': entities, 'relations': relations, 'events': events},
+      calls: calls,
+    );
+  }
+
+  Future<_HybridResult> _hybridExtract({
+    required Map<String, dynamic> data,
+    required QualityReport report,
+    required List<Map<String, Object>> items,
+    required ChapterContent content,
+    required ResolvedAiModel resolved,
+    required KnowledgeRoutingConfig routing,
+    required String taskId,
+  }) async {
+    final codes = report.issues.map((issue) => issue.code).toSet();
+    final needEntity = codes.any(
+      (code) => code.startsWith('entity') || code == 'duplicate_entity_name',
+    );
+    final needRelation = codes.any((code) => code.startsWith('relation'));
+    final needEvent = codes.any((code) => code.startsWith('event'));
+    if (!needEntity && !needRelation && !needEvent) {
+      return _HybridResult(data: data, calls: 0, merged: 0, conflicts: 0);
+    }
+    final merged = jsonDecode(jsonEncode(data)) as Map<String, dynamic>;
+    final entities = (merged['entities'] as List? ?? const [])
+        .whereType<Map>()
+        .map((item) => Map<String, dynamic>.from(item))
+        .toList();
+    var calls = 0;
+    var mergedCount = 0;
+    var conflicts = 0;
+    if (needEntity) {
+      final entityData = await _runEntitySpecialized(
+        items: items,
+        content: content,
+        resolved: resolved,
+        routing: routing,
+        taskId: taskId,
+        existing: entities,
+      );
+      calls += 1;
+      final extra = _normalizeEntities(entityData, entities);
+      final result = _mergeEntities(entities, extra);
+      mergedCount += result.$1;
+      conflicts += result.$2;
+    }
+    if (needRelation || needEntity) {
+      final relationData = await _runRelationSpecialized(
+        items: items,
+        content: content,
+        resolved: resolved,
+        routing: routing,
+        taskId: taskId,
+        entities: entities,
+      );
+      calls += 1;
+      final extra = _normalizeRelations(relationData, entities);
+      final relations = (merged['relations'] as List? ?? const [])
+          .whereType<Map>()
+          .map((item) => Map<String, dynamic>.from(item))
+          .toList();
+      final result = _mergeRelations(relations, extra);
+      mergedCount += result.$1;
+      conflicts += result.$2;
+      merged['relations'] = relations;
+    }
+    if (needEvent) {
+      final eventData = await _runEventSpecialized(
+        items: items,
+        content: content,
+        resolved: resolved,
+        routing: routing,
+        taskId: taskId,
+        entities: entities,
+      );
+      calls += 1;
+      final events = (merged['events'] as List? ?? const [])
+          .whereType<Map>()
+          .map((item) => Map<String, dynamic>.from(item))
+          .toList();
+      final result = _mergeEvents(events, _normalizeEvents(eventData));
+      mergedCount += result.$1;
+      conflicts += result.$2;
+      merged['events'] = events;
+    }
+    merged['entities'] = entities;
+    return _HybridResult(
+      data: merged,
+      calls: calls,
+      merged: mergedCount,
+      conflicts: conflicts,
+    );
+  }
+
+  Future<Map<String, dynamic>> _runEntitySpecialized({
+    required List<Map<String, Object>> items,
+    required ChapterContent content,
+    required ResolvedAiModel resolved,
+    required KnowledgeRoutingConfig routing,
+    required String taskId,
+    required List<Map<String, dynamic>> existing,
+  }) async {
+    final version = await aiSettings.activePromptVersion('entity_extract_v2');
+    final schemaVersion = await store.activeSchemaVersion('entity_extraction');
+    await store.recordRoutingDecision(
+      taskId: taskId,
+      taskType: 'entity_extraction',
+      requestedModelId: resolved.model.id,
+      routedModelId: routing.entityModelId ?? resolved.model.id,
+      providerId: resolved.provider.id,
+      mode: routing.mode,
+      reason: routing.mode == 'hybrid' ? '联合结果实体质量不足' : '实体专项抽取',
+      specialized: true,
+      triggerReason: routing.mode == 'hybrid' ? '实体证据或类型异常' : null,
+    );
+    final prompt = await aiSettings.render('entity_extract_v2', {
+      'book_title': content.bookTitle,
+      'chapter_title': content.chapterTitle,
+      'items_json': jsonEncode(items),
+      'existing_entities_json': jsonEncode(
+        existing
+            .map(
+              (item) => {
+                'name': item['name'],
+                'type': item['type'],
+                'dynasty': item['dynasty'],
+              },
+            )
+            .toList(),
+      ),
+    });
+    return client.chatJson(
+      purpose: 'extraction',
+      prompt: prompt,
+      temperature: 0.1,
+      taskId: taskId,
+      taskType: 'entity_extraction',
+      promptVersion: version,
+      schemaVersion: schemaVersion,
+      modelId: routing.entityModelId,
+      shouldCancel: () async {
+        final current = await store.getTask(taskId);
+        return current == null ||
+            current.status == 'cancelled' ||
+            current.status == 'paused';
+      },
+    );
+  }
+
+  Future<Map<String, dynamic>> _runRelationSpecialized({
+    required List<Map<String, Object>> items,
+    required ChapterContent content,
+    required ResolvedAiModel resolved,
+    required KnowledgeRoutingConfig routing,
+    required String taskId,
+    required List<Map<String, dynamic>> entities,
+  }) async {
+    final version = await aiSettings.activePromptVersion('relation_extract_v2');
+    final schemaVersion = await store.activeSchemaVersion(
+      'relation_extraction',
+    );
+    await store.recordRoutingDecision(
+      taskId: taskId,
+      taskType: 'relation_extraction',
+      requestedModelId: resolved.model.id,
+      routedModelId: routing.relationModelId ?? resolved.model.id,
+      providerId: resolved.provider.id,
+      mode: routing.mode,
+      reason: routing.mode == 'hybrid' ? '联合结果关系质量不足' : '关系专项抽取',
+      specialized: true,
+      triggerReason: routing.mode == 'hybrid' ? '关系端点或证据异常' : null,
+    );
+    final prompt = await aiSettings.render('relation_extract_v2', {
+      'book_title': content.bookTitle,
+      'chapter_title': content.chapterTitle,
+      'items_json': jsonEncode(items),
+      'entities_json': jsonEncode(
+        entities
+            .map(
+              (item) => {
+                'id': item['id'],
+                'name': item['name'],
+                'type': item['type'],
+              },
+            )
+            .toList(),
+      ),
+    });
+    return client.chatJson(
+      purpose: 'extraction',
+      prompt: prompt,
+      temperature: 0.1,
+      taskId: taskId,
+      taskType: 'relation_extraction',
+      promptVersion: version,
+      schemaVersion: schemaVersion,
+      modelId: routing.relationModelId,
+      shouldCancel: () async {
+        final current = await store.getTask(taskId);
+        return current == null ||
+            current.status == 'cancelled' ||
+            current.status == 'paused';
+      },
+    );
+  }
+
+  Future<Map<String, dynamic>> _runEventSpecialized({
+    required List<Map<String, Object>> items,
+    required ChapterContent content,
+    required ResolvedAiModel resolved,
+    required KnowledgeRoutingConfig routing,
+    required String taskId,
+    required List<Map<String, dynamic>> entities,
+  }) async {
+    final version = await aiSettings.activePromptVersion('event_extract_v2');
+    final schemaVersion = await store.activeSchemaVersion('event_extraction');
+    await store.recordRoutingDecision(
+      taskId: taskId,
+      taskType: 'event_extraction',
+      requestedModelId: resolved.model.id,
+      routedModelId: routing.eventModelId ?? resolved.model.id,
+      providerId: resolved.provider.id,
+      mode: routing.mode,
+      reason: routing.mode == 'hybrid' ? '联合结果事件质量不足' : '事件专项抽取',
+      specialized: true,
+      triggerReason: routing.mode == 'hybrid' ? '事件时间或参与者异常' : null,
+    );
+    final prompt = await aiSettings.render('event_extract_v2', {
+      'book_title': content.bookTitle,
+      'chapter_title': content.chapterTitle,
+      'items_json': jsonEncode(items),
+      'entities_json': jsonEncode(
+        entities
+            .map(
+              (item) => {
+                'id': item['id'],
+                'name': item['name'],
+                'type': item['type'],
+              },
+            )
+            .toList(),
+      ),
+    });
+    return client.chatJson(
+      purpose: 'extraction',
+      prompt: prompt,
+      temperature: 0.1,
+      taskId: taskId,
+      taskType: 'event_extraction',
+      promptVersion: version,
+      schemaVersion: schemaVersion,
+      modelId: routing.eventModelId,
+      shouldCancel: () async {
+        final current = await store.getTask(taskId);
+        return current == null ||
+            current.status == 'cancelled' ||
+            current.status == 'paused';
+      },
+    );
+  }
+
+  List<Map<String, dynamic>> _normalizeEntities(
+    Map<String, dynamic> data,
+    List<Map<String, dynamic>> existing,
+  ) {
+    var nextId = existing.fold<int>(
+      1,
+      (max, item) => math.max(max, (item['id'] as num? ?? 0).toInt() + 1),
+    );
+    final result = <Map<String, dynamic>>[];
+    for (final item in jsonList(data['entities'])) {
+      final name = jsonString(item['name']);
+      if (name == null || name.isEmpty) continue;
+      result.add({
+        'id': nextId++,
+        'name': name,
+        'type': jsonString(item['type']) ?? 'other',
+        'aliases': _jsonStringList(item['aliases']),
+        'dynasty': jsonString(item['dynasty']),
+        'identity': jsonString(item['identity']),
+        'summary': jsonString(item['summary']),
+        'evidence': _intList(item['evidence']),
+        'confidence': (item['confidence'] as num? ?? 0.6).toDouble(),
+        'needs_disambiguation': item['needs_disambiguation'] == true,
+      });
+    }
+    return result;
+  }
+
+  List<Map<String, dynamic>> _normalizeRelations(
+    Map<String, dynamic> data,
+    List<Map<String, dynamic>> entities,
+  ) {
+    final result = <Map<String, dynamic>>[];
+    for (final item in jsonList(data['relations'])) {
+      final from = jsonInt(item['from']);
+      final to = jsonInt(item['to']);
+      final type = jsonString(item['type']);
+      final evidence = _intList(item['evidence']);
+      if (from == null ||
+          to == null ||
+          from == to ||
+          type == null ||
+          evidence.isEmpty) {
+        continue;
+      }
+      if (!entities.any((entity) => entity['id'] == from) ||
+          !entities.any((entity) => entity['id'] == to)) {
+        continue;
+      }
+      result.add({
+        'from': from,
+        'to': to,
+        'type': type,
+        'description': jsonString(item['description']),
+        'valid_from': jsonString(item['valid_from']),
+        'valid_to': jsonString(item['valid_to']),
+        'precision': jsonString(item['precision']) ?? 'unknown',
+        'evidence': evidence,
+        'confidence': (item['confidence'] as num? ?? 0.6).toDouble(),
+        'ambiguous': item['ambiguous'] == true,
+      });
+    }
+    return result;
+  }
+
+  List<Map<String, dynamic>> _normalizeEvents(Map<String, dynamic> data) {
+    final result = <Map<String, dynamic>>[];
+    for (final item in jsonList(data['events'])) {
+      final name = jsonString(item['name']);
+      final evidence = _intList(item['evidence']);
+      if (name == null || name.isEmpty || evidence.isEmpty) continue;
+      result.add({
+        'name': name,
+        'type': jsonString(item['type']) ?? 'other',
+        'description': jsonString(item['description']),
+        'time': jsonString(item['time']),
+        'year': jsonInt(item['year']),
+        'end_year': jsonInt(item['end_year']),
+        'precision': jsonString(item['precision']) ?? 'unknown',
+        'location': jsonString(item['location']),
+        'participants': _intList(item['participants']),
+        'evidence': evidence,
+        'confidence': (item['confidence'] as num? ?? 0.6).toDouble(),
+      });
+    }
+    return result;
+  }
+
+  (int, int) _mergeEntities(
+    List<Map<String, dynamic>> target,
+    List<Map<String, dynamic>> extra,
+  ) {
+    var merged = 0;
+    var conflicts = 0;
+    for (final item in extra) {
+      final name = _normalizeEntityName('${item['name']}');
+      final existing = target
+          .where((entity) => _normalizeEntityName('${entity['name']}') == name)
+          .firstOrNull;
+      if (existing == null) {
+        item['id'] = target.fold<int>(
+          1,
+          (max, entity) =>
+              math.max(max, (entity['id'] as num? ?? 0).toInt() + 1),
+        );
+        target.add(item);
+        merged += 1;
+        continue;
+      }
+      if (existing['type'] != item['type']) conflicts += 1;
+      final aliases = {
+        ..._jsonStringList(existing['aliases']),
+        ..._jsonStringList(item['aliases']),
+      };
+      existing['aliases'] = aliases.toList();
+      existing['evidence'] = {
+        ..._intList(existing['evidence']),
+        ..._intList(item['evidence']),
+      }.toList();
+      existing['dynasty'] ??= item['dynasty'];
+      existing['summary'] ??= item['summary'];
+      merged += 1;
+    }
+    return (merged, conflicts);
+  }
+
+  (int, int) _mergeRelations(
+    List<Map<String, dynamic>> target,
+    List<Map<String, dynamic>> extra,
+  ) {
+    var merged = 0;
+    var conflicts = 0;
+    for (final item in extra) {
+      final existing = target
+          .where(
+            (relation) =>
+                relation['from'] == item['from'] &&
+                relation['to'] == item['to'] &&
+                relation['type'] == item['type'],
+          )
+          .firstOrNull;
+      if (existing == null) {
+        target.add(item);
+        merged += 1;
+        continue;
+      }
+      if (existing['precision'] != item['precision']) conflicts += 1;
+      existing['evidence'] = {
+        ..._intList(existing['evidence']),
+        ..._intList(item['evidence']),
+      }.toList();
+      existing['description'] ??= item['description'];
+      existing['valid_from'] ??= item['valid_from'];
+      existing['valid_to'] ??= item['valid_to'];
+      merged += 1;
+    }
+    return (merged, conflicts);
+  }
+
+  (int, int) _mergeEvents(
+    List<Map<String, dynamic>> target,
+    List<Map<String, dynamic>> extra,
+  ) {
+    var merged = 0;
+    var conflicts = 0;
+    for (final item in extra) {
+      final existing = target
+          .where(
+            (event) =>
+                event['name'] == item['name'] && event['type'] == item['type'],
+          )
+          .firstOrNull;
+      if (existing == null) {
+        target.add(item);
+        merged += 1;
+        continue;
+      }
+      if (existing['year'] != null &&
+          item['year'] != null &&
+          existing['year'] != item['year']) {
+        conflicts += 1;
+      }
+      existing['evidence'] = {
+        ..._intList(existing['evidence']),
+        ..._intList(item['evidence']),
+      }.toList();
+      existing['participants'] = {
+        ..._intList(existing['participants']),
+        ..._intList(item['participants']),
+      }.toList();
+      existing['year'] ??= item['year'];
+      existing['location'] ??= item['location'];
+      merged += 1;
+    }
+    return (merged, conflicts);
+  }
+
+  List<int> _intList(Object? value) {
+    if (value is! List) return const [];
+    final result = <int>[];
+    for (final item in value) {
+      final parsed = item is num ? item.toInt() : int.tryParse('$item');
+      if (parsed != null) result.add(parsed);
+    }
+    return result;
   }
 
   Future<Map<int, _EntityDecision>> _resolveEntityDecisions({
@@ -872,6 +1420,10 @@ class KnowledgeService {
           whereArgs: [from, to, type],
           limit: 1,
         );
+        final validFromRaw = jsonString(item['valid_from']);
+        final validToRaw = jsonString(item['valid_to']);
+        final precision = jsonString(item['precision']) ?? 'unknown';
+        final ambiguous = item['ambiguous'] == true;
         final now = nowIso();
         String relationId;
         if (existing.isEmpty) {
@@ -882,10 +1434,14 @@ class KnowledgeService {
             'to_entity_id': to,
             'relation_type': type,
             'label': type,
-            'description': null,
-            'status': 'inferred',
+            'description': jsonString(item['description']),
+            'status': ambiguous ? 'pending' : 'inferred',
             'knowledge_type': 'inferred',
-            'confidence': 0.65,
+            'confidence': (item['confidence'] as num? ?? 0.65).toDouble(),
+            'valid_from_raw': validFromRaw,
+            'valid_to_raw': validToRaw,
+            'time_precision': precision,
+            'source_kind': 'ai',
             'created_at': now,
             'updated_at': now,
           });
@@ -893,6 +1449,25 @@ class KnowledgeService {
         } else {
           relationId = existing.first['id'] as String;
           matchedRelations += 1;
+          final updates = <String, Object?>{'updated_at': now};
+          if (existing.first['description'] == null &&
+              jsonString(item['description']) != null) {
+            updates['description'] = jsonString(item['description']);
+          }
+          if (existing.first['valid_from_raw'] == null &&
+              validFromRaw != null) {
+            updates['valid_from_raw'] = validFromRaw;
+          }
+          if (existing.first['valid_to_raw'] == null && validToRaw != null) {
+            updates['valid_to_raw'] = validToRaw;
+          }
+          if (ambiguous) updates['status'] = 'pending';
+          await txn.update(
+            'entity_relations',
+            updates,
+            where: 'id = ?',
+            whereArgs: [relationId],
+          );
         }
         for (final sentence in evidence) {
           await _insertRelationSourceIfMissing(
@@ -964,15 +1539,18 @@ class KnowledgeService {
             'id': eventId,
             'name': name,
             'event_type': type,
-            'description': null,
+            'description': jsonString(item['description']),
             'dynasty': null,
             'time_raw': time,
             'time_start_year': year,
-            'time_end_year': year,
+            'time_end_raw': jsonString(item['time_end']),
+            'time_end_year': jsonInt(item['end_year']),
+            'location': jsonString(item['location']),
             'time_precision': precision,
-            'time_note': null,
+            'time_note': jsonString(item['time_note']),
             'status': 'extracted',
             'knowledge_type': 'inferred',
+            'source_kind': 'ai',
             'fingerprint': fingerprint,
             'created_at': now,
             'updated_at': now,
@@ -2608,6 +3186,25 @@ class KnowledgeException implements Exception {
   final String message;
   @override
   String toString() => message;
+}
+
+class _SpecializedResult {
+  const _SpecializedResult({required this.data, required this.calls});
+  final Map<String, dynamic> data;
+  final int calls;
+}
+
+class _HybridResult {
+  const _HybridResult({
+    required this.data,
+    required this.calls,
+    required this.merged,
+    required this.conflicts,
+  });
+  final Map<String, dynamic> data;
+  final int calls;
+  final int merged;
+  final int conflicts;
 }
 
 class _EntityCandidate {

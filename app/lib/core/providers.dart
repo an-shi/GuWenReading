@@ -12,6 +12,7 @@ import 'local/local_store.dart';
 import 'local/quality_service.dart';
 import 'local/search_service.dart';
 import 'local/task_recovery_service.dart';
+import 'local/tokenizer_vocabulary.dart';
 import 'local/translation_service.dart';
 
 final appDatabaseProvider = Provider<AppDatabase>((ref) {
@@ -36,6 +37,10 @@ final budgetServiceProvider = Provider<BudgetService>((ref) {
 
 final qualityServiceProvider = Provider<QualityService>((ref) {
   return const QualityService();
+});
+
+final tokenizerVocabularyProvider = Provider<TokenizerVocabularyService>((ref) {
+  return TokenizerVocabularyService(ref.watch(localStoreProvider));
 });
 
 final importServiceProvider = Provider<ImportService>((ref) {

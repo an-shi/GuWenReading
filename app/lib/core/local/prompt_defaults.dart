@@ -29,6 +29,80 @@ class DefaultPrompt {
 
 const defaultPrompts = <DefaultPrompt>[
   DefaultPrompt(
+    key: 'entity_extract_v2',
+    name: '实体专项抽取',
+    description: '独立实体 Prompt，使用短索引证据，输出紧凑实体结构。',
+    variables: [
+      'book_title',
+      'chapter_title',
+      'items_json',
+      'existing_entities_json',
+    ],
+    template: '''你是严谨的古籍实体抽取助手。只抽取原文明确出现或可直接指认的实体。
+
+书籍：{{book_title}}
+章节：{{chapter_title}}
+已有实体（可复用名称）：
+{{existing_entities_json}}
+原文句子（i 为编号）：
+{{items_json}}
+
+只输出紧凑 JSON：
+{"entities":[{"name":"标准名称","type":"person","aliases":[],"dynasty":null,"identity":null,"summary":null,"evidence":[1],"confidence":0.9,"needs_disambiguation":false}]}
+
+要求：
+1. type 仅用 person/place/office/institution/dynasty/work/other。
+2. evidence 必须是本批句子编号，不得编造。
+3. 已有实体优先复用标准名称；无法确认身份时 needs_disambiguation 为 true。
+4. 不输出原文摘录或冗长介绍。''',
+  ),
+  DefaultPrompt(
+    key: 'relation_extract_v2',
+    name: '关系专项抽取',
+    description: '独立关系 Prompt，关系端点使用实体短 ID，支持有效时间范围。',
+    variables: ['book_title', 'chapter_title', 'items_json', 'entities_json'],
+    template: '''你是严谨的古籍关系抽取助手。只抽取原文有依据的实体关系。
+
+书籍：{{book_title}}
+章节：{{chapter_title}}
+已识别实体（id 为实体短 ID）：
+{{entities_json}}
+原文句子（i 为编号）：
+{{items_json}}
+
+只输出紧凑 JSON：
+{"relations":[{"from":1,"to":2,"type":"君臣关系","description":null,"valid_from":null,"valid_to":null,"precision":"unknown","evidence":[1],"confidence":0.8,"ambiguous":false}]}
+
+要求：
+1. from/to 必须引用已识别实体 id。
+2. 关系类型：君臣关系/亲属关系/师生关系/朋友关系/敌对关系/任职关系/隶属关系/政治关系/军事关系/其他。
+3. 任职等有时间范围的关系，尽量给出 valid_from/valid_to 原文与 precision。
+4. evidence 必须是真实句子编号；无证据不要输出。''',
+  ),
+  DefaultPrompt(
+    key: 'event_extract_v2',
+    name: '事件专项抽取',
+    description: '独立事件 Prompt，支持年份、朝代、时期和不确定时间。',
+    variables: ['book_title', 'chapter_title', 'items_json', 'entities_json'],
+    template: '''你是严谨的古籍历史事件抽取助手。只抽取原文明确记载的事件。
+
+书籍：{{book_title}}
+章节：{{chapter_title}}
+已识别实体（id 为实体短 ID）：
+{{entities_json}}
+原文句子（i 为编号）：
+{{items_json}}
+
+只输出紧凑 JSON：
+{"events":[{"name":"事件名称","type":"war","description":null,"time":"原文时间","year":null,"end_year":null,"precision":"unknown","location":null,"participants":[1,2],"evidence":[1],"confidence":0.8,"time_note":null}]}
+
+要求：
+1. type：war/coup/accession/appointment/migration/diplomacy/institution_change/other。
+2. precision：exact_date/year_month/year/dynasty/period/estimated/unknown。
+3. 原文没有精确日期时 year 可为 null，不得编造。
+4. participants 只能引用已识别实体 id；evidence 必须是真实句子编号。''',
+  ),
+  DefaultPrompt(
     key: 'entity_disambiguation',
     name: '实体消歧',
     description: '在多个本地候选中判断同名实体是否应合并；只返回候选 ID、置信度和理由。',

@@ -27,6 +27,7 @@ Future<void> main() async {
   );
   await container.read(settingsProvider.notifier).load();
   await container.read(aiSettingsProvider).seedPrompts();
+  await container.read(tokenizerVocabularyProvider).loadInstalled();
   await AiScheduler.instance.loadConfig(container.read(localStoreProvider));
   await container.read(taskRecoveryServiceProvider).recoverOnStartup();
   runApp(

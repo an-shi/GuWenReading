@@ -607,4 +607,34 @@ const List<String> schemaStatements = [
   )
   ''',
   'CREATE INDEX IF NOT EXISTS idx_routing_task ON ai_routing_decisions(task_id, created_at DESC)',
+  '''
+  CREATE TABLE IF NOT EXISTS tokenizer_vocabularies (
+    key TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    version TEXT NOT NULL,
+    models TEXT NOT NULL DEFAULT '[]',
+    source TEXT,
+    file_size INTEGER NOT NULL DEFAULT 0,
+    checksum TEXT NOT NULL,
+    vocab_json TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'installed',
+    installed_at TEXT NOT NULL
+  )
+  ''',
+  '''
+  CREATE TABLE IF NOT EXISTS gemini_cached_contents (
+    id TEXT PRIMARY KEY,
+    cache_key TEXT NOT NULL,
+    provider_id TEXT NOT NULL,
+    model_id TEXT NOT NULL,
+    remote_name TEXT NOT NULL,
+    token_count INTEGER NOT NULL DEFAULT 0,
+    ttl_seconds INTEGER NOT NULL DEFAULT 3600,
+    expires_at TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'active',
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+  )
+  ''',
+  'CREATE INDEX IF NOT EXISTS idx_gemini_cache_key ON gemini_cached_contents(cache_key, status)',
 ];
